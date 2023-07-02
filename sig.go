@@ -4,6 +4,8 @@ import (
 	"errors"
 
 	"gitlab.com/yawning/secp256k1-voi"
+	"gitlab.com/yawning/secp256k1-voi/secec"
+	"gitlab.com/yawning/secp256k1-voi/secec/bitcoin"
 )
 
 const (
@@ -84,7 +86,7 @@ func getNonceValues(keyCtx *KeyAggContext, aggNonce *PublicNonce, m []byte) (*se
 	return b, rP, e // b, R, e
 }
 
-func (ctx *KeyAggContext) getSessionKeyAggCoeff(pk *PublicKey) *secp256k1.Scalar {
+func (ctx *KeyAggContext) getSessionKeyAggCoeff(pk *secec.PublicKey) *secp256k1.Scalar {
 	// Fail if pk not in pk_1..u
 	var ok bool
 	for _, v := range ctx.pks {
@@ -99,7 +101,7 @@ func (ctx *KeyAggContext) getSessionKeyAggCoeff(pk *PublicKey) *secp256k1.Scalar
 	return keyAggCoeff(ctx.pks, pk)
 }
 
-func (k *PrivateKey) Sign(keyCtx *KeyAggContext, secNonce *SecretNonce, aggNonce *PublicNonce, m []byte) (*PartialSignature, error) {
+func Sign(k *secec.PrivateKey, keyCtx *KeyAggContext, secNonce *SecretNonce, aggNonce *PublicNonce, m []byte) (*PartialSignature, error) {
 	// Let (Q, gacc, _, b, R, e) = GetSessionValues(session_ctx);
 	// fail if that fails
 	b, R, e := getNonceValues(keyCtx, aggNonce, m)
@@ -116,12 +118,12 @@ func (k *PrivateKey) Sign(keyCtx *KeyAggContext, secNonce *SecretNonce, aggNonce
 	// Let P = d' * G
 	// Let pk = cbytes(P)
 	// Fail if pk != secnonce[64:97]
-	if k.pk.p.Equal(secNonce.pk) != 1 {
+	if k.PublicKey().Point().Equal(secNonce.pk) != 1 {
 		return nil, errKeyNonceMismatch
 	}
 
 	// Let a = GetSessionKeyAggCoeff(session_ctx, P); fail if that fails
-	a := keyCtx.getSessionKeyAggCoeff(k.pk)
+	a := keyCtx.getSessionKeyAggCoeff(k.PublicKey())
 	if a == nil {
 		return nil, errPublicKeyNotInAgg
 	}
@@ -132,7 +134,7 @@ func (k *PrivateKey) Sign(keyCtx *KeyAggContext, secNonce *SecretNonce, aggNonce
 	g := secp256k1.NewScalar().ConditionalSelect(scOne, scNegOne, keyCtx.q.IsYOdd())
 
 	// Let d = g * gacc * d' mod n (See Negation Of The Secret Key When Signing)
-	d := secp256k1.NewScalar().Product(g, keyCtx.gacc, k.dPrime)
+	d := secp256k1.NewScalar().Product(g, keyCtx.gacc, k.Scalar())
 
 	// Let s = (k1 + b * k2 + e * a * d) mod n
 	// Let psig = bytes(32, s)
@@ -172,7 +174,7 @@ func PartialSigAgg(keyCtx *KeyAggContext, aggNonce *PublicNonce, m []byte, pSigs
 
 	// Return sig = xbytes(R) || bytes(32, s)
 	rXBytes, _ := R.XBytes()   // Can't fail, R not infinity
-	sig := make([]byte, 0, 64) // XXX/yawning: magic number
+	sig := make([]byte, 0, bitcoin.SchnorrSignatureSize)
 	sig = append(sig, rXBytes...)
 	sig = append(sig, s.Bytes()...)
 

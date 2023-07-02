@@ -6,9 +6,13 @@ import (
 	"crypto/sha256"
 	"encoding"
 	"hash"
+
+	"gitlab.com/yawning/secp256k1-voi"
 )
 
 // Dumping ground for various helpers.
+
+var cIdentityBytes = make([]byte, secp256k1.CompressedPointSize)
 
 func newTaggedHash(tag string) hash.Hash {
 	hashedTag := sha256.Sum256([]byte(tag))

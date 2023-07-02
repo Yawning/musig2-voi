@@ -44,7 +44,7 @@ func testSignVectors(t *testing.T) {
 			aggNonce := testVectors.AggNonce(t, vec.NonceIndices)
 			require.EqualValues(t, expectedAggNonce.Bytes(), aggNonce.Bytes())
 
-			partialSig, err := sk.Sign(ctx, secNonce, aggNonce, msg)
+			partialSig, err := Sign(sk, ctx, secNonce, aggNonce, msg)
 			require.NoError(t, err, "Sign")
 			require.EqualValues(t, vec.Expected(), partialSig.Bytes())
 		})
@@ -92,7 +92,7 @@ func testSignVectors(t *testing.T) {
 			}
 			aggNonce := aggNonces[vec.AggNonceIndex]
 
-			partialSig, err := sk.Sign(ctx, secNonce, aggNonce, msg)
+			partialSig, err := Sign(sk, ctx, secNonce, aggNonce, msg)
 			require.Error(t, err, "Sign")
 			require.Nil(t, partialSig)
 		})

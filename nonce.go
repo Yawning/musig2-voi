@@ -9,6 +9,7 @@ import (
 	"math"
 
 	"gitlab.com/yawning/secp256k1-voi"
+	"gitlab.com/yawning/secp256k1-voi/secec"
 )
 
 const (
@@ -28,8 +29,6 @@ var (
 	errInvalidExtraInput     = errors.New("musig2: invalid exra input")
 	errKIsZero               = errors.New("musig2: k1 or k2 is zero")
 	errInvalidNumberOfNonces = errors.New("musig2: invalid number of nonces")
-
-	cIdentityBytes = make([]byte, secp256k1.CompressedPointSize)
 )
 
 type PublicNonce struct {
@@ -98,27 +97,27 @@ type SecretNonce struct {
 // XXX: Figure out how to handle SecretNonce s11n vs consumption.
 
 // XXX/yawning: aggpk -> type
-func (k *PublicKey) NonceGen(sk *PrivateKey, aggpk, m, extraIn []byte) (*SecretNonce, *PublicNonce, error) {
+func NonceGen(k *secec.PublicKey, sk *secec.PrivateKey, aggpk, m, extraIn []byte) (*SecretNonce, *PublicNonce, error) {
 	// Let rand' be a 32-byte array freshly drawn uniformly at random
 	var randP [nonceEntropySize]byte
 	if _, err := csrand.Read(randP[:]); err != nil {
 		return nil, nil, errors.Join(errEntropySource, err)
 	}
-	return k.nonceGen(sk, aggpk, m, extraIn, randP[:])
+	return nonceGen(k, sk, aggpk, m, extraIn, randP[:])
 }
 
-func (k *PublicKey) nonceGen(sk *PrivateKey, aggpk, m, extraIn, randP []byte) (*SecretNonce, *PublicNonce, error) {
+func nonceGen(k *secec.PublicKey, sk *secec.PrivateKey, aggpk, m, extraIn, randP []byte) (*SecretNonce, *PublicNonce, error) {
 	var rand []byte
 	// If the optional argument sk is present:
 	if sk != nil {
 		// This is possibly "harmless", but it is a sign that
 		// the caller is doing something horrifically wrong.
-		if !sk.pk.Equal(k) {
+		if !sk.PublicKey().Equal(k) {
 			panic(errKeyMismatch) // Yes, a panic.
 		}
 
 		// Let rand be the byte-wise xor of sk and hashMuSig/aux(rand')
-		rand = sk.dPrime.Bytes()
+		rand = sk.Bytes()
 		subtle.XORBytes(rand, rand, taggedHash(tagNonceAux, randP))
 	} else {
 		// Else: Let rand = rand'
@@ -144,12 +143,14 @@ func (k *PublicKey) nonceGen(sk *PrivateKey, aggpk, m, extraIn, randP []byte) (*
 	//
 	// Note/yawning: Just use TupleHash, Jesus fucking Christ.
 
+	kBytes := k.CompressedBytes()
+
 	h := newTaggedHash(tagNonce)
-	_, _ = h.Write(rand)                        // rand
-	_, _ = h.Write([]byte{byte(len(k.pBytes))}) // bytes(1, len(pk))
-	_, _ = h.Write(k.pBytes)                    // pk
-	_, _ = h.Write([]byte{byte(len(aggpk))})    // bytes(1, len(aggpk))
-	_, _ = h.Write(aggpk)                       // aggpk
+	_, _ = h.Write(rand)                      // rand
+	_, _ = h.Write([]byte{byte(len(kBytes))}) // bytes(1, len(pk))
+	_, _ = h.Write(kBytes)                    // pk
+	_, _ = h.Write([]byte{byte(len(aggpk))})  // bytes(1, len(aggpk))
+	_, _ = h.Write(aggpk)                     // aggpk
 
 	// If the optional argument m is not present:
 	if m == nil { // NOT `m == len(0)` to distinguish `no m` vs `0-length m`.
@@ -199,7 +200,7 @@ func (k *PublicKey) nonceGen(sk *PrivateKey, aggpk, m, extraIn, randP []byte) (*
 	secnonce := &SecretNonce{
 		k1: k1,
 		k2: k2,
-		pk: secp256k1.NewPointFrom(k.p),
+		pk: k.Point(),
 		pn: pubnonce, // XXX/yawning: Clone this or something....
 	}
 

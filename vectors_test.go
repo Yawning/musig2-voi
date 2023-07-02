@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"gitlab.com/yawning/secp256k1-voi/secec"
 )
 
 const (
@@ -55,8 +56,8 @@ type tvHeader struct {
 	// Cache deserialized values.
 	//
 	// Note: It is assumed that the test vectors are immutable.
-	sk            *PrivateKey
-	pubKeys       []*PublicKey
+	sk            *secec.PrivateKey
+	pubKeys       []*secec.PublicKey
 	pubKeysErrs   []error
 	tweaks        [][]byte
 	secNonces     []*SecretNonce
@@ -70,29 +71,29 @@ type tvHeader struct {
 	pSigsErrs     []error
 }
 
-func (hdr *tvHeader) SecKey(t *testing.T) *PrivateKey {
+func (hdr *tvHeader) SecKey(t *testing.T) *secec.PrivateKey {
 	if hdr.sk != nil {
 		return hdr.sk
 	}
 
-	sk, err := NewPrivateKey(mustUnhex(hdr.Sk))
+	sk, err := secec.NewPrivateKey(mustUnhex(hdr.Sk))
 	require.NoError(t, err, "NewPrivateKey")
 	hdr.sk = sk
 
 	return sk
 }
 
-func (hdr *tvHeader) PubKeys() ([]*PublicKey, []error) {
+func (hdr *tvHeader) PubKeys() ([]*secec.PublicKey, []error) {
 	if hdr.pubKeys != nil {
 		return hdr.pubKeys, hdr.pubKeysErrs
 	}
 
 	l := len(hdr.Pubkeys)
-	keys := make([]*PublicKey, 0, l)
+	keys := make([]*secec.PublicKey, 0, l)
 	errs := make([]error, 0, l)
 
 	for _, x := range hdr.Pubkeys {
-		pk, err := NewPublicKey(mustUnhex(x))
+		pk, err := secec.NewPublicKey(mustUnhex(x))
 		keys = append(keys, pk)
 		errs = append(errs, err)
 	}
@@ -219,11 +220,11 @@ func (hdr *tvHeader) PartialSigs() ([]*PartialSignature, []error) {
 	return psigs, errs
 }
 
-func (hdr *tvHeader) SortedPubKeys(t *testing.T) []*PublicKey {
-	keys := make([]*PublicKey, 0, len(hdr.SortedPubkeys))
+func (hdr *tvHeader) SortedPubKeys(t *testing.T) []*secec.PublicKey {
+	keys := make([]*secec.PublicKey, 0, len(hdr.SortedPubkeys))
 
 	for _, x := range hdr.SortedPubkeys {
-		pk, err := NewPublicKey(mustUnhex(x))
+		pk, err := secec.NewPublicKey(mustUnhex(x))
 		require.NoError(t, err, "NewPublicKey")
 		keys = append(keys, pk)
 	}
@@ -238,7 +239,7 @@ func (hdr *tvHeader) Msg() []byte {
 func (hdr *tvHeader) KeyAggContext(t *testing.T, indices []int) *KeyAggContext {
 	hdrPubKeys, errs := hdr.PubKeys()
 
-	pks := make([]*PublicKey, 0, len(indices))
+	pks := make([]*secec.PublicKey, 0, len(indices))
 	for _, idx := range indices {
 		pk := hdrPubKeys[idx]
 		require.NotNil(t, pk, "pubKey[%d]", idx)

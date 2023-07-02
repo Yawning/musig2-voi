@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"gitlab.com/yawning/secp256k1-voi/secec"
 )
 
 func testNonceGenVectors(t *testing.T) {
@@ -35,16 +36,16 @@ func testNonceGenVectors(t *testing.T) {
 			randP := mustUnhex(vec.RandP)
 
 			var (
-				sk                  *PrivateKey
-				pk                  *PublicKey
+				sk                  *secec.PrivateKey
+				pk                  *secec.PublicKey
 				err                 error
 				aggpk, msg, extraIn []byte
 			)
 			if x := vec.PrivateKey; x != "" {
-				sk, err = NewPrivateKey(mustUnhex(x))
+				sk, err = secec.NewPrivateKey(mustUnhex(x))
 				require.NoError(t, err, "NewPrivateKey")
 			}
-			pk, err = NewPublicKey(mustUnhex(vec.PublicKey))
+			pk, err = secec.NewPublicKey(mustUnhex(vec.PublicKey))
 			require.NoError(t, err, "NewPublicKey")
 
 			if x := vec.AggPk; x != "" {
@@ -60,7 +61,7 @@ func testNonceGenVectors(t *testing.T) {
 				extraIn = mustUnhex(x)
 			}
 
-			secnonce, pubnonce, err := pk.nonceGen(sk, aggpk, msg, extraIn, randP)
+			secnonce, pubnonce, err := nonceGen(pk, sk, aggpk, msg, extraIn, randP)
 			require.NoError(t, err, "nonceGen")
 
 			expectedPub := mustUnhex(vec.ExpectedPubNonce)

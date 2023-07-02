@@ -2,7 +2,6 @@ package musig2
 
 import (
 	"bytes"
-	"crypto/subtle"
 	"errors"
 	"math"
 	"sort"
@@ -12,9 +11,7 @@ import (
 )
 
 const (
-	PrivateKeySize = 32 // secp256k1.ScalarSize
-	PublicKeySize  = 33 // secp256k1.CompressedPointSize
-	TweakSize      = 32 // secp256k1.ScalarSize
+	TweakSize = 32 // secp256k1.ScalarSize
 
 	maxPublicKeys = math.MaxUint32
 
@@ -30,92 +27,22 @@ var (
 	errInvalidNumberOfKeys = errors.New("musig2: invalid number of public keys")
 	errInvalidTweak        = errors.New("musig2: invalid tweak")
 	errQIsInfinity         = errors.New("musig2: Q is the point at infinity")
-
-	pkInf = &PublicKey{
-		p:      secp256k1.NewIdentityPoint(),
-		pBytes: make([]byte, PublicKeySize),
-	}
 )
 
-type PrivateKey struct {
-	dPrime *secp256k1.Scalar
-	pk     *PublicKey
-}
-
-func (k *PrivateKey) Bytes() []byte {
-	return k.dPrime.Bytes()
-}
-
-func NewPrivateKey(b []byte) (*PrivateKey, error) {
-	ecK, err := secec.NewPrivateKey(b)
-	if err != nil {
-		return nil, err
-	}
-
-	ecPk := ecK.PublicKey()
-
-	return &PrivateKey{
-		dPrime: ecK.Scalar(),
-		pk: &PublicKey{
-			p:      ecPk.Point(),
-			pBytes: ecPk.CompressedBytes(),
-		},
-	}, nil
-}
-
-type PublicKey struct {
-	p      *secp256k1.Point // Invariant: Not infinity
-	pBytes []byte
-}
-
-func (k *PublicKey) Bytes() []byte {
-	if k.pBytes == nil {
-		panic(errInvalidPublicKey)
-	}
-	return bytes.Clone(k.pBytes)
-}
-
-func (k *PublicKey) Equal(other *PublicKey) bool {
-	return subtle.ConstantTimeCompare(k.pBytes, other.pBytes) == 1
-}
-
-func (k *PublicKey) clone() *PublicKey {
-	if k.pBytes == nil {
-		panic(errInvalidPublicKey)
-	}
-
-	return &PublicKey{
-		p:      secp256k1.NewPointFrom(k.p),
-		pBytes: bytes.Clone(k.pBytes),
-	}
-}
-
-func NewPublicKey(b []byte) (*PublicKey, error) {
-	p, err := secp256k1.NewIdentityPoint().SetCompressedBytes(b)
-	if err != nil {
-		return nil, errors.Join(errInvalidPublicKey, err)
-	}
-
-	return &PublicKey{
-		p:      p,
-		pBytes: bytes.Clone(b),
-	}, nil
-}
-
-func KeySort(pks []*PublicKey) ([]*PublicKey, error) {
+func KeySort(pks []*secec.PublicKey) ([]*secec.PublicKey, error) {
 	u := len(pks)
 	if uint64(u) > maxPublicKeys || u == 0 {
 		return nil, errInvalidNumberOfKeys
 	}
 
-	ret := make([]*PublicKey, 0, u)
+	ret := make([]*secec.PublicKey, 0, u)
 	ret = append(ret, pks...)
 
 	// Return pk_1..u sorted in lexicographical order.
 	sort.SliceStable(
 		ret,
 		func(i, j int) bool {
-			return bytes.Compare(ret[i].pBytes, ret[j].pBytes) < 0
+			return bytes.Compare(ret[i].CompressedBytes(), ret[j].CompressedBytes()) < 0
 		},
 	)
 
@@ -127,7 +54,7 @@ type KeyAggContext struct {
 	tacc *secp256k1.Scalar
 	gacc *secp256k1.Scalar
 
-	pks []*PublicKey
+	pks []*secec.PublicKey
 }
 
 // XXX: Figure out how to handle KeyAggContext s11n.
@@ -180,7 +107,7 @@ func (ctx *KeyAggContext) ApplyTweak(tweak []byte, isXOnlyTweak bool) error {
 	return nil
 }
 
-func KeyAgg(pks []*PublicKey) (*KeyAggContext, error) {
+func KeyAgg(pks []*secec.PublicKey) (*KeyAggContext, error) {
 	u := len(pks)
 	if uint64(u) > maxPublicKeys || u == 0 {
 		return nil, errInvalidNumberOfKeys
@@ -190,7 +117,7 @@ func KeyAgg(pks []*PublicKey) (*KeyAggContext, error) {
 	pk2 := getSecondKey(pks)
 
 	// For i = 1 .. u:
-	pks2 := make([]*PublicKey, 0, u)
+	pks2 := make([]*secec.PublicKey, 0, u)
 	Q := secp256k1.NewIdentityPoint()
 	for i := range pks {
 		pk_i := pks[i]
@@ -201,7 +128,7 @@ func KeyAgg(pks []*PublicKey) (*KeyAggContext, error) {
 		// Note/yawning: Since we use sensible data-types rather
 		// than byte vectors for public keys, `pks` is guaranteed
 		// to be a vector of points on the curve.
-		P_i := pk_i.p
+		P_i := pk_i.Point()
 		if P_i.IsIdentity() != 0 {
 			// Should be impossible, but the check is cheap.
 			panic(errInvalidPublicKey)
@@ -213,7 +140,7 @@ func KeyAgg(pks []*PublicKey) (*KeyAggContext, error) {
 		Q_i := secp256k1.NewIdentityPoint().ScalarMult(a_i, P_i) // XXX/perf: Vartime
 		Q.Add(Q, Q_i)
 
-		pks2 = append(pks2, pk_i.clone())
+		pks2 = append(pks2, pk_i)
 	}
 
 	// Let Q = a1 * P1 + a2 * P2 + ... + au * Pu
@@ -239,17 +166,17 @@ func KeyAgg(pks []*PublicKey) (*KeyAggContext, error) {
 }
 
 // Internal Algorithm HashKeys(pk_1..u)
-func hashKeys(pks []*PublicKey) []byte {
+func hashKeys(pks []*secec.PublicKey) []byte {
 	// Return hashKeyAgg list(pk_1 || pk_2 || ... || pk_u)
 	h := newTaggedHash(tagKeyAggList)
 	for _, pk := range pks {
-		_, _ = h.Write(pk.pBytes)
+		_, _ = h.Write(pk.CompressedBytes())
 	}
 	return h.Sum(nil)
 }
 
 // Internal Algorithm GetSecondKey(pk_1..u)
-func getSecondKey(pks []*PublicKey) *PublicKey {
+func getSecondKey(pks []*secec.PublicKey) []byte {
 	pk1 := pks[0] // The spec starts indexes from 1.
 
 	// For j = 1 .. u:
@@ -261,16 +188,16 @@ func getSecondKey(pks []*PublicKey) *PublicKey {
 		// If pk_j != pk_1:
 		if !pk.Equal(pk1) {
 			// Return pk_j
-			return pks[i]
+			return pks[i].CompressedBytes()
 		}
 	}
 
 	// Return bytes(33, 0)
-	return pkInf
+	return cIdentityBytes
 }
 
 // Internal Algorithm KeyAggCoeff(pk_1..u, pk')
-func keyAggCoeff(pks []*PublicKey, pkP *PublicKey) *secp256k1.Scalar {
+func keyAggCoeff(pks []*secec.PublicKey, pkP *secec.PublicKey) *secp256k1.Scalar {
 	// Let pk2 = GetSecondKey(pk_1..u):
 	pk2 := getSecondKey(pks)
 
@@ -279,12 +206,12 @@ func keyAggCoeff(pks []*PublicKey, pkP *PublicKey) *secp256k1.Scalar {
 }
 
 // Internal Algorithm KeyAggCoeffInternal(pk_1..u, pk', pk2)
-func keyAggCoeffInternal(pks []*PublicKey, pkP, pk2 *PublicKey) *secp256k1.Scalar {
+func keyAggCoeffInternal(pks []*secec.PublicKey, pkP *secec.PublicKey, pk2 []byte) *secp256k1.Scalar {
 	// Let L = HashKeys(pk1..u)
 	L := hashKeys(pks) // XXX/perf: Cache and reuse this holy shit.
 
 	// If pk' = pk2:
-	if pkP.Equal(pk2) { // XXX/perf: Reorder to before hashing.
+	if bytes.Equal(pkP.CompressedBytes(), pk2) { // XXX/perf: Reorder to before hashing.
 		// Return 1
 		return scOne
 	}
@@ -292,8 +219,8 @@ func keyAggCoeffInternal(pks []*PublicKey, pkP, pk2 *PublicKey) *secp256k1.Scala
 	// Return int(hashKeyAgg coefficient(L || pk')) mod n
 	b := taggedHash(
 		tagKeyAggCoefficient,
-		L,          // L
-		pkP.pBytes, // pk'
+		L,                     // L
+		pkP.CompressedBytes(), // pk'
 	)
 	sc, _ := secp256k1.NewScalarFromBytes((*[secp256k1.ScalarSize]byte)(b))
 

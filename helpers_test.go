@@ -9,10 +9,6 @@ import (
 
 const secretNonceSize = 97
 
-func (pk *PublicKey) String() string {
-	return hex.EncodeToString(pk.pBytes)
-}
-
 func (n *SecretNonce) Bytes() []byte {
 	b := make([]byte, 0, secretNonceSize)
 	b = append(b, n.k1.Bytes()...)
