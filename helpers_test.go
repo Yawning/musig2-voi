@@ -42,11 +42,14 @@ func newSecretNonce(b []byte) (*SecretNonce, error) {
 		return nil, err
 	}
 
-	return &SecretNonce{
+	secnonce := &SecretNonce{
 		k1: k1,
 		k2: k2,
 		pk: pk,
-	}, nil
+	}
+	secnonce.publicNonce = secnonce.genPublicNonce()
+
+	return secnonce, nil
 }
 
 func mustUnhex(str string) []byte {

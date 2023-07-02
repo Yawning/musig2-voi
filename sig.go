@@ -9,6 +9,8 @@ import (
 )
 
 const (
+	// PartialSignatureSize is the size of a byte-encoded PartialSignature
+	// in bytes.
 	PartialSignatureSize = 32 // secp256k1.ScalarSize
 
 	tagSchnorrChallenge = "BIP0340/challenge"
@@ -16,19 +18,22 @@ const (
 
 var (
 	errKeyNonceMismatch    = errors.New("musig2: secnonce for different private key")
-	errPublicKeyNotInAgg   = errors.New("musig2: public key not part of aggregate key")
 	errInvalidNumberOfSigs = errors.New("musig2: invalid number of signatures")
 	errInvalidPartialSig   = errors.New("musig2: invalid partial signature")
 )
 
+// PartialSignature is an un-aggregated partial signature.
 type PartialSignature struct {
 	s *secp256k1.Scalar
 }
 
+// Bytes returns the byte-encoding of the PartialSignature.
 func (ps *PartialSignature) Bytes() []byte {
 	return ps.s.Bytes()
 }
 
+// NewPartialSignature deserializes a PartialSignature from the byte-encoded
+// form.
 func NewPartialSignature(b []byte) (*PartialSignature, error) {
 	if len(b) != PartialSignatureSize {
 		return nil, errInvalidPartialSig
@@ -44,9 +49,9 @@ func NewPartialSignature(b []byte) (*PartialSignature, error) {
 	}, nil
 }
 
-func getNonceValues(keyCtx *KeyAggContext, aggNonce *PublicNonce, m []byte) (*secp256k1.Scalar, *secp256k1.Point, *secp256k1.Scalar) {
+func getNonceValues(aggPk *AggregatedPublicKey, aggNonce *AggregatedPublicNonce, m []byte) (*secp256k1.Scalar, *secp256k1.Point, *secp256k1.Scalar) {
 	// Let (Q, gacc, tacc) = keyagg_ctx_v
-	qXBytes := keyCtx.XBytes()
+	qXBytes := aggPk.xBytes()
 
 	// Let b = int(hashMuSig/noncecoef(aggnonce || xbytes(Q) || m)) mod n
 	bBytes := taggedHash(
@@ -86,25 +91,14 @@ func getNonceValues(keyCtx *KeyAggContext, aggNonce *PublicNonce, m []byte) (*se
 	return b, rP, e // b, R, e
 }
 
-func (ctx *KeyAggContext) getSessionKeyAggCoeff(pk *secec.PublicKey) *secp256k1.Scalar {
-	// Fail if pk not in pk_1..u
-	var ok bool
-	for _, v := range ctx.pks {
-		if ok = v.Equal(pk); ok {
-			break
-		}
-	}
-	if !ok {
-		return nil
-	}
-
-	return keyAggCoeff(ctx.pks, pk)
-}
-
-func Sign(k *secec.PrivateKey, keyCtx *KeyAggContext, secNonce *SecretNonce, aggNonce *PublicNonce, m []byte) (*PartialSignature, error) {
+// Sign produces a PartialSignature over msg.
+//
+// WARNING: `secNonce` MUST NEVER be reused or exposed otherwise the signing
+// key will be trivially compromised from partial signature(s).
+func Sign(k *secec.PrivateKey, aggPk *AggregatedPublicKey, secNonce *SecretNonce, aggNonce *AggregatedPublicNonce, msg []byte) (*PartialSignature, error) {
 	// Let (Q, gacc, _, b, R, e) = GetSessionValues(session_ctx);
 	// fail if that fails
-	b, R, e := getNonceValues(keyCtx, aggNonce, m)
+	b, R, e := getNonceValues(aggPk, aggNonce, msg)
 
 	// Let k1' = int(secnonce[0:32]), k2' = int(secnonce[32:64])
 	// Fail if ki' = 0 or ki' >= n for i = 1..2
@@ -123,18 +117,18 @@ func Sign(k *secec.PrivateKey, keyCtx *KeyAggContext, secNonce *SecretNonce, agg
 	}
 
 	// Let a = GetSessionKeyAggCoeff(session_ctx, P); fail if that fails
-	a := keyCtx.getSessionKeyAggCoeff(k.PublicKey())
-	if a == nil {
-		return nil, errPublicKeyNotInAgg
+	a, err := aggPk.getSessionKeyAggCoeff(k.PublicKey())
+	if err != nil {
+		return nil, err
 	}
 
 	// XXX/yawning: Obliterate secNonce or something
 
 	// Let g = 1 if has_even_y(Q), otherwise let g = -1 mod n
-	g := secp256k1.NewScalar().ConditionalSelect(scOne, scNegOne, keyCtx.q.IsYOdd())
+	g := secp256k1.NewScalar().ConditionalSelect(scOne, scNegOne, aggPk.q.IsYOdd())
 
 	// Let d = g * gacc * d' mod n (See Negation Of The Secret Key When Signing)
-	d := secp256k1.NewScalar().Product(g, keyCtx.gacc, k.Scalar())
+	d := secp256k1.NewScalar().Product(g, aggPk.gacc, k.Scalar())
 
 	// Let s = (k1 + b * k2 + e * a * d) mod n
 	// Let psig = bytes(32, s)
@@ -151,32 +145,69 @@ func Sign(k *secec.PrivateKey, keyCtx *KeyAggContext, secNonce *SecretNonce, agg
 
 // TODO: PartialSigVerify or whatever, who cares.
 
-func PartialSigAgg(keyCtx *KeyAggContext, aggNonce *PublicNonce, m []byte, pSigs []*PartialSignature) ([]byte, error) {
-	// Let (Q, _, tacc, _, _, R, e) = GetSessionValues(session_ctx);
-	// fail if that fails
-	_, R, e := getNonceValues(keyCtx, aggNonce, m)
+// PartialSignatureAggregator accumulates PartialSignatures, before doing
+// the final aggregation and generating a BIP-340 compatible Schnorr
+// signature.
+type PartialSignatureAggregator struct {
+	r *secp256k1.Point
+	s *secp256k1.Scalar
+
+	u, expectedSigs uint64
+}
+
+// Add adds a PartialSignature to the signature aggregator.
+func (agg *PartialSignatureAggregator) Add(pSig *PartialSignature) error {
+	if agg.u+1 > agg.expectedSigs {
+		return errInvalidNumberOfSigs
+	}
 
 	// For i = 1 .. u:
-	// Let s_i = int(psig_i);
-	// fail if s_i >= n and blame signer i for invalid partial signature.
-	if len(pSigs) != len(keyCtx.pks) {
+	//   Let s_i = int(psig_i);
+	//   fail if s_i >= n and blame signer i for invalid partial signature.
+	//
+	// Let s = s_1 + ... + s_u + e * g * tacc mod n
+	//
+	// Note/yawning: agg.s is initialized to `e * g * tacc mod n`,
+	// so all that's left to do is to add all the partial signatures.
+	agg.s.Add(agg.s, pSig.s)
+	agg.u++
+
+	return nil
+}
+
+// Aggregate produces a BIP-340 compatible Schnorr signature.  This operation
+// does not affect the state of the PartialSignatureAggregator.
+func (agg *PartialSignatureAggregator) Aggregate() ([]byte, error) {
+	if agg.u != agg.expectedSigs {
 		return nil, errInvalidNumberOfSigs
 	}
 
-	// Let g = 1 if has_even_y(Q), otherwise let g = -1 mod n
-	g := secp256k1.NewScalar().ConditionalSelect(scOne, scNegOne, keyCtx.q.IsYOdd())
-
-	// Let s = s_1 + ... + s_u + e * g * tacc mod n
-	s := secp256k1.NewScalar().Product(e, g, keyCtx.tacc)
-	for _, pSig := range pSigs {
-		s.Add(s, pSig.s)
-	}
-
 	// Return sig = xbytes(R) || bytes(32, s)
-	rXBytes, _ := R.XBytes()   // Can't fail, R not infinity
+	rXBytes, _ := agg.r.XBytes() // Can't fail, R not infinity
 	sig := make([]byte, 0, bitcoin.SchnorrSignatureSize)
 	sig = append(sig, rXBytes...)
-	sig = append(sig, s.Bytes()...)
+	sig = append(sig, agg.s.Bytes()...)
 
 	return sig, nil
+}
+
+// NewPartialSignatureAggregator creates a PartialSignatureAggregator,
+// initialized to gather partial signatures made with `(aggPk, aggNonce)`
+// over `msg`.
+func NewPartialSignatureAggregator(aggPk *AggregatedPublicKey, aggNonce *AggregatedPublicNonce, msg []byte) *PartialSignatureAggregator {
+	// Let (Q, _, tacc, _, _, R, e) = GetSessionValues(session_ctx);
+	// fail if that fails
+	_, R, e := getNonceValues(aggPk, aggNonce, msg)
+
+	// Let g = 1 if has_even_y(Q), otherwise let g = -1 mod n
+	g := secp256k1.NewScalar().ConditionalSelect(scOne, scNegOne, aggPk.q.IsYOdd())
+
+	// Let s = s_1 + ... + s_u + e * g * tacc mod n
+	s := secp256k1.NewScalar().Product(e, g, aggPk.tacc)
+
+	return &PartialSignatureAggregator{
+		r:            R,
+		s:            s,
+		expectedSigs: uint64(len(aggPk.pks)),
+	}
 }

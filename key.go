@@ -8,9 +8,11 @@ import (
 
 	"gitlab.com/yawning/secp256k1-voi"
 	"gitlab.com/yawning/secp256k1-voi/secec"
+	"gitlab.com/yawning/secp256k1-voi/secec/bitcoin"
 )
 
 const (
+	// TweakSize is the size of an aggregated public key tweak in bytes.
 	TweakSize = 32 // secp256k1.ScalarSize
 
 	maxPublicKeys = math.MaxUint32
@@ -26,16 +28,13 @@ var (
 	errInvalidPublicKey    = errors.New("musig2: invalid public key")
 	errInvalidNumberOfKeys = errors.New("musig2: invalid number of public keys")
 	errInvalidTweak        = errors.New("musig2: invalid tweak")
+	errPublicKeyNotInAgg   = errors.New("musig2: public key not part of aggregate key")
 	errQIsInfinity         = errors.New("musig2: Q is the point at infinity")
 )
 
-func KeySort(pks []*secec.PublicKey) ([]*secec.PublicKey, error) {
-	u := len(pks)
-	if uint64(u) > maxPublicKeys || u == 0 {
-		return nil, errInvalidNumberOfKeys
-	}
-
-	ret := make([]*secec.PublicKey, 0, u)
+func keySort(pks []*secec.PublicKey) []*secec.PublicKey {
+	// INVARIANT: 0 < u < maxPublicKeys
+	ret := make([]*secec.PublicKey, 0, len(pks))
 	ret = append(ret, pks...)
 
 	// Return pk_1..u sorted in lexicographical order.
@@ -46,10 +45,11 @@ func KeySort(pks []*secec.PublicKey) ([]*secec.PublicKey, error) {
 		},
 	)
 
-	return ret, nil
+	return ret
 }
 
-type KeyAggContext struct {
+// AggregatedPublicKey is the aggregated and tweaked public key.
+type AggregatedPublicKey struct {
 	q    *secp256k1.Point // Invariant: Not infinity
 	tacc *secp256k1.Scalar
 	gacc *secp256k1.Scalar
@@ -57,17 +57,8 @@ type KeyAggContext struct {
 	pks []*secec.PublicKey
 }
 
-// XXX: Figure out how to handle KeyAggContext s11n.
-
-func (ctx *KeyAggContext) XBytes() []byte { // XXX/yawning: Maybe private this.
-	b, err := ctx.q.XBytes()
-	if err != nil {
-		panic(err)
-	}
-	return b
-}
-
-func (ctx *KeyAggContext) ApplyTweak(tweak []byte, isXOnlyTweak bool) error {
+// ApplyTweak applies a tweak to the aggregated public key.
+func (aggPk *AggregatedPublicKey) ApplyTweak(tweak []byte, isXOnlyTweak bool) error {
 	if len(tweak) != TweakSize {
 		return errInvalidTweak
 	}
@@ -76,7 +67,7 @@ func (ctx *KeyAggContext) ApplyTweak(tweak []byte, isXOnlyTweak bool) error {
 
 	// If is_xonly_t and not has_even_y(Q):
 	g := scOne // Else: Let g = 1
-	if isXOnlyTweak && ctx.q.IsYOdd() != 0 {
+	if isXOnlyTweak && aggPk.q.IsYOdd() != 0 {
 		// Let g = -1 mod n
 		g = scNegOne
 	}
@@ -88,7 +79,7 @@ func (ctx *KeyAggContext) ApplyTweak(tweak []byte, isXOnlyTweak bool) error {
 	}
 
 	// Let Q' = g * Q + t * G
-	qP := secp256k1.NewIdentityPoint().DoubleScalarMultBasepointVartime(t, g, ctx.q)
+	qP := secp256k1.NewIdentityPoint().DoubleScalarMultBasepointVartime(t, g, aggPk.q)
 
 	// Fail if is_infinite(Q')
 	if qP.IsIdentity() != 0 {
@@ -96,28 +87,102 @@ func (ctx *KeyAggContext) ApplyTweak(tweak []byte, isXOnlyTweak bool) error {
 	}
 
 	// Let gacc' = g * gacc mod n
-	ctx.gacc.Multiply(g, ctx.gacc)
+	aggPk.gacc.Multiply(g, aggPk.gacc)
 
 	// Let tacc' = t + g * tacc mod n
-	ctx.tacc = secp256k1.NewScalar().Sum(t, secp256k1.NewScalar().Product(g, ctx.tacc))
+	aggPk.tacc = secp256k1.NewScalar().Sum(t, secp256k1.NewScalar().Product(g, aggPk.tacc))
 
 	// Return keyagg_ctx' = (Q', gacc', tacc')
-	ctx.q.Set(qP)
+	aggPk.q.Set(qP)
 
 	return nil
 }
 
-func KeyAgg(pks []*secec.PublicKey) (*KeyAggContext, error) {
-	u := len(pks)
-	if uint64(u) > maxPublicKeys || u == 0 {
+// Schnorr returns the BIP-340 Schnorr public key corresponding to the
+// aggregated public key.
+func (aggPk *AggregatedPublicKey) Schnorr() *bitcoin.SchnorrPublicKey {
+	pk, err := bitcoin.NewSchnorrPublicKey(aggPk.xBytes())
+	if err != nil {
+		panic(err)
+	}
+	return pk
+}
+
+func (aggPk *AggregatedPublicKey) xBytes() []byte {
+	b, err := aggPk.q.XBytes()
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+func (aggPk *AggregatedPublicKey) getSessionKeyAggCoeff(pk *secec.PublicKey) (*secp256k1.Scalar, error) {
+	// Fail if pk not in pk_1..u
+	var ok bool
+	for _, v := range aggPk.pks {
+		if ok = v.Equal(pk); ok {
+			break
+		}
+	}
+	if !ok {
+		return nil, errPublicKeyNotInAgg
+	}
+
+	return keyAggCoeff(aggPk.pks, pk), nil
+}
+
+// PublicKeyAggregator accumulates PublicKeys, before doing the final
+// aggregation and generating an AggregatedPublicKey.
+type PublicKeyAggregator struct {
+	pks []*secec.PublicKey
+
+	applyKeySort bool
+}
+
+// SetKeySort sets if the individual public keys should be sorted during
+// the final aggregation step.
+func (agg *PublicKeyAggregator) SetKeySort(t bool) *PublicKeyAggregator {
+	agg.applyKeySort = t
+	return agg
+}
+
+// Add adds a PublicKey to the key aggregator.
+//
+// WARNING: Unless the PublicKeyAggregator is configured to sort the public
+// keys, the order in which PublicKeys are added matters.
+func (agg *PublicKeyAggregator) Add(pk *secec.PublicKey) error {
+	if uint64(len(agg.pks))+1 > maxPublicKeys {
+		return errInvalidNumberOfKeys
+	}
+	if pk == nil {
+		panic(errInvalidPublicKey)
+	}
+
+	agg.pks = append(agg.pks, pk)
+
+	return nil
+}
+
+// Aggregate produces an AggregatedPublicKey.  This operation does not affect
+// the state of the PublicKeyAggregator.
+func (agg *PublicKeyAggregator) Aggregate() (*AggregatedPublicKey, error) {
+	pks := agg.pks
+	if u := len(pks); uint64(u) > maxPublicKeys || u == 0 {
 		return nil, errInvalidNumberOfKeys
 	}
+
+	if agg.applyKeySort {
+		pks = keySort(pks)
+	}
+
+	//
+	// KeyAgg - Key Aggregation
+	//
 
 	// Let pk2 = GetSecondKey(pk_1..u)
 	pk2 := getSecondKey(pks)
 
 	// For i = 1 .. u:
-	pks2 := make([]*secec.PublicKey, 0, u)
 	Q := secp256k1.NewIdentityPoint()
 	for i := range pks {
 		pk_i := pks[i]
@@ -129,18 +194,12 @@ func KeyAgg(pks []*secec.PublicKey) (*KeyAggContext, error) {
 		// than byte vectors for public keys, `pks` is guaranteed
 		// to be a vector of points on the curve.
 		P_i := pk_i.Point()
-		if P_i.IsIdentity() != 0 {
-			// Should be impossible, but the check is cheap.
-			panic(errInvalidPublicKey)
-		}
 
 		// Let a_i = KeyAggCoeffInternal(pk_1..u, pk_i, pk2).
 		a_i := keyAggCoeffInternal(pks, pk_i, pk2)
 
 		Q_i := secp256k1.NewIdentityPoint().ScalarMult(a_i, P_i) // XXX/perf: Vartime
 		Q.Add(Q, Q_i)
-
-		pks2 = append(pks2, pk_i)
 	}
 
 	// Let Q = a1 * P1 + a2 * P2 + ... + au * Pu
@@ -157,12 +216,17 @@ func KeyAgg(pks []*secec.PublicKey) (*KeyAggContext, error) {
 	// Let gacc = 1
 	// Let tacc = 0
 	// Return keyagg_ctx = (Q, gacc, tacc).
-	return &KeyAggContext{
+	return &AggregatedPublicKey{
 		q:    Q,
 		gacc: secp256k1.NewScalarFrom(scOne),
 		tacc: secp256k1.NewScalar(),
-		pks:  pks2,
+		pks:  pks,
 	}, nil
+}
+
+// NewPublicKeyAggregator creates an empty PublicKeyAggregator.
+func NewPublicKeyAggregator() *PublicKeyAggregator {
+	return new(PublicKeyAggregator)
 }
 
 // Internal Algorithm HashKeys(pk_1..u)

@@ -13,9 +13,12 @@ import (
 )
 
 const (
+	// PublicNonceSize is the size of a byte-encoded (Aggregated)PublicNonce
+	// in bytes.
 	PublicNonceSize = 66 // secp256k1.CompressedPointSize * 2
 
 	nonceEntropySize = 32
+	maxNonces        = math.MaxUint32
 
 	tagNonceAux         = "MuSig/aux"
 	tagNonce            = "MuSig/nonce"
@@ -31,22 +34,21 @@ var (
 	errInvalidNumberOfNonces = errors.New("musig2: invalid number of nonces")
 )
 
+// PublicNonce is an un-aggregated (individual) public nonce.
 type PublicNonce struct {
 	r1, r2 *secp256k1.Point
 	b      []byte
 }
 
-func (n *PublicNonce) isValidPublic() bool {
-	return n.r1.IsIdentity() == 0 && n.r2.IsIdentity() == 0
-}
-
+// Bytes returns the byte-encoding of the PublicNonce.
 func (n *PublicNonce) Bytes() []byte {
 	if len(n.b) == 0 {
 		panic(errInvalidPublicNonce)
 	}
-	return n.b
+	return bytes.Clone(n.b)
 }
 
+// NewPublicNonce deserializes a PublicNonce from the byte-encoded form.
 func NewPublicNonce(b []byte) (*PublicNonce, error) {
 	n, err := NewAggregatedPublicNonce(b)
 	if err != nil {
@@ -57,10 +59,27 @@ func NewPublicNonce(b []byte) (*PublicNonce, error) {
 		return nil, errInvalidPublicNonce
 	}
 
-	return n, nil
+	return (*PublicNonce)(n), nil
 }
 
-func NewAggregatedPublicNonce(b []byte) (*PublicNonce, error) {
+// AggregatedPublicNnce is an aggregated (group) public nonce.
+type AggregatedPublicNonce PublicNonce
+
+// Bytes returns the byte-encoding of the AggregatedPublicNonce.
+func (n *AggregatedPublicNonce) Bytes() []byte {
+	if len(n.b) == 0 {
+		panic(errInvalidPublicNonce)
+	}
+	return bytes.Clone(n.b)
+}
+
+func (n *AggregatedPublicNonce) isValidPublic() bool {
+	return n.r1.IsIdentity() == 0 && n.r2.IsIdentity() == 0
+}
+
+// NewAggregatedPublicNonce deserializes an AggregatedPublicNonce from the
+// byte-encoded form.
+func NewAggregatedPublicNonce(b []byte) (*AggregatedPublicNonce, error) {
 	if len(b) != PublicNonceSize {
 		return nil, errInvalidPublicNonce
 	}
@@ -80,30 +99,67 @@ func NewAggregatedPublicNonce(b []byte) (*PublicNonce, error) {
 		}
 	}
 
-	return &PublicNonce{
+	return &AggregatedPublicNonce{
 		r1: r1,
 		r2: r2,
 		b:  bytes.Clone(b),
 	}, nil
 }
 
+// SecretNonce is a individual secret nonce.
+//
+// WARNING: This value MUST NEVER be reused or exposed otherwise the signing
+// key will be trivially compromised from partial signature(s).
 type SecretNonce struct {
 	k1, k2 *secp256k1.Scalar
 	pk     *secp256k1.Point
 
-	pn *PublicNonce
+	publicNonce *PublicNonce
+}
+
+// PublicNonce returns the SecretNonce's corresponding PublicNonce.
+func (n *SecretNonce) PublicNonce() *PublicNonce {
+	return n.publicNonce
+}
+
+func (n *SecretNonce) genPublicNonce() *PublicNonce {
+	// Let R_1 = k1 * G, R_2 = k2 * G
+	R_1 := secp256k1.NewIdentityPoint().ScalarBaseMult(n.k1)
+	R_2 := secp256k1.NewIdentityPoint().ScalarBaseMult(n.k2)
+
+	// Let pubnonce = cbytes(R_1) || cbytes(R_2)
+	b := make([]byte, 0, PublicNonceSize)
+	b = append(b, R_1.CompressedBytes()...)
+	b = append(b, R_2.CompressedBytes()...)
+	return &PublicNonce{
+		r1: R_1,
+		r2: R_2,
+		b:  b,
+	}
 }
 
 // XXX: Figure out how to handle SecretNonce s11n vs consumption.
 
-// XXX/yawning: aggpk -> type
-func NonceGen(k *secec.PublicKey, sk *secec.PrivateKey, aggpk, m, extraIn []byte) (*SecretNonce, *PublicNonce, error) {
+// GenerateNonce generates a new SecretNonce/PublicNonce pair for a given
+// individual PublicKey.  All other parameters are optional, but strongly
+// recommended, to reduce the probability of nonce-reuse.
+//
+// Note that there is a difference in output generated between `msg = nil`
+// and `msg = []byte{}`, as the algorithm treats omitting msg entirely
+// differently from msg that is the empty byte string.
+func GenerateNonce(k *secec.PublicKey, sk *secec.PrivateKey, aggPk *AggregatedPublicKey, msg, extraIn []byte) (*SecretNonce, *PublicNonce, error) {
 	// Let rand' be a 32-byte array freshly drawn uniformly at random
 	var randP [nonceEntropySize]byte
 	if _, err := csrand.Read(randP[:]); err != nil {
 		return nil, nil, errors.Join(errEntropySource, err)
 	}
-	return nonceGen(k, sk, aggpk, m, extraIn, randP[:])
+
+	var aggPkBytes []byte
+	if aggPk != nil {
+		aggPkBytes = aggPk.xBytes()
+	}
+
+	return nonceGen(k, sk, aggPkBytes, msg, extraIn, randP[:])
 }
 
 func nonceGen(k *secec.PublicKey, sk *secec.PrivateKey, aggpk, m, extraIn, randP []byte) (*SecretNonce, *PublicNonce, error) {
@@ -182,77 +238,85 @@ func nonceGen(k *secec.PublicKey, sk *secec.PrivateKey, aggpk, m, extraIn, randP
 		return nil, nil, errKIsZero
 	}
 
-	// Let R_1 = k1 * G, R_2 = k2 * G
-	R_1 := secp256k1.NewIdentityPoint().ScalarBaseMult(k1)
-	R_2 := secp256k1.NewIdentityPoint().ScalarBaseMult(k2)
-
-	// Let pubnonce = cbytes(R_1) || cbytes(R_2)
-	b := make([]byte, 0, PublicNonceSize)
-	b = append(b, R_1.CompressedBytes()...)
-	b = append(b, R_2.CompressedBytes()...)
-	pubnonce := &PublicNonce{
-		r1: R_1,
-		r2: R_2,
-		b:  b,
-	}
-
 	// Let secnonce = bytes(32, k1) || bytes(32, k2) || pk
 	secnonce := &SecretNonce{
 		k1: k1,
 		k2: k2,
 		pk: k.Point(),
-		pn: pubnonce, // XXX/yawning: Clone this or something....
 	}
+	secnonce.publicNonce = secnonce.genPublicNonce()
 
-	return secnonce, pubnonce, nil
+	return secnonce, secnonce.PublicNonce(), nil
 }
 
-func NonceAgg(nonces []*PublicNonce) (*PublicNonce, error) {
-	u := len(nonces)
-	if uint64(u) > math.MaxUint32 {
-		return nil, errInvalidNumberOfNonces
+// PublicNonceAggregator accumulates PublicNonces, before doing the final aggregation
+// and generating an AggregatedPublicNonce.
+type PublicNonceAggregator struct {
+	r1, r2 *secp256k1.Point
+	u      uint64
+}
+
+// Add adds a PublicNonce to the nonce aggregator.
+func (agg *PublicNonceAggregator) Add(nonce *PublicNonce) error {
+	if agg.u+1 > maxNonces {
+		return errInvalidNumberOfNonces
 	}
 
-	R_1, R_2 := secp256k1.NewIdentityPoint(), secp256k1.NewIdentityPoint()
+	// Let Ri,j = cpoint(pubnonce_i[(j-1)*33:j*33]); fail if
+	// that fails and blame signer i for invalid pubnonce.
+	//
+	// Note/yawning: Like with KeyAgg, since we use sensible
+	// data-types, nonce is guaranteed to be valid.
 
-	// For j = 1 .. 2:
-	//   For i = 1 .. u:
-	for _, n := range nonces {
-		// Let Ri,j = cpoint(pubnonce_i[(j-1)*33:j*33]); fail if
-		// that fails and blame signer i for invalid pubnonce.
-		//
-		// Note/yawning: Like with KeyAgg, since we use sensible
-		// data-types, nonces is guaranteed to be a vector of
-		// PublicNonces, unless the caller did something stupid.
-		if !n.isValidPublic() {
-			// In which case, they get a panic.
-			panic(errInvalidPublicNonce)
+	if agg.r1 == nil {
+		if agg.r2 != nil || agg.u != 0 {
+			panic("BUG: PublicNonceAggregator state corruption")
 		}
+		agg.r1 = secp256k1.NewPointFrom(nonce.r1)
+		agg.r2 = secp256k1.NewPointFrom(nonce.r2)
+	} else {
+		agg.r1.Add(agg.r1, nonce.r1)
+		agg.r2.Add(agg.r2, nonce.r2)
+	}
+	agg.u++
 
-		R_1.Add(R_1, n.r1)
-		R_2.Add(R_2, n.r2)
+	return nil
+}
+
+// Aggregate produces an AggregatedPublicNonce.  This operation does not affect
+// the state of the PublicNonceAggregator.
+func (agg *PublicNonceAggregator) Aggregate() (*AggregatedPublicNonce, error) {
+	if agg.u > maxNonces || agg.u == 0 {
+		return nil, errInvalidNumberOfNonces
 	}
 
 	// Let Rj = R1,j + R2,j + ... + Ru,j
 	//
-	// Note: Done in the for loop.
+	// Note/yawning: Done incrementally as part of add.
+
+	r1, r2 := secp256k1.NewPointFrom(agg.r1), secp256k1.NewPointFrom(agg.r2)
 
 	// Return aggnonce = cbytes_ext(R1) || cbytes_ext(R2)
 	b := make([]byte, 0, PublicNonceSize)
-	if R_1.IsIdentity() != 0 {
+	if r1.IsIdentity() != 0 {
 		b = append(b, cIdentityBytes...)
 	} else {
-		b = append(b, R_1.CompressedBytes()...)
+		b = append(b, r1.CompressedBytes()...)
 	}
-	if R_2.IsIdentity() != 0 {
+	if r2.IsIdentity() != 0 {
 		b = append(b, cIdentityBytes...)
 	} else {
-		b = append(b, R_2.CompressedBytes()...)
+		b = append(b, r2.CompressedBytes()...)
 	}
 
-	return &PublicNonce{
-		r1: R_1,
-		r2: R_2,
+	return &AggregatedPublicNonce{
+		r1: r1,
+		r2: r2,
 		b:  b,
 	}, nil
+}
+
+// NewPublicNonceAggregator creates an empty PublicNonceAggregator.
+func NewPublicNonceAggregator() *PublicNonceAggregator {
+	return new(PublicNonceAggregator)
 }

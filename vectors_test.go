@@ -64,7 +64,7 @@ type tvHeader struct {
 	secNoncesErrs []error
 	pubNonces     []*PublicNonce
 	pubNoncesErrs []error
-	aggNonces     []*PublicNonce
+	aggNonces     []*AggregatedPublicNonce
 	aggNoncesErrs []error
 	msgs          [][]byte
 	pSigs         []*PartialSignature
@@ -162,13 +162,13 @@ func (hdr *tvHeader) PubNonces() ([]*PublicNonce, []error) {
 	return nonces, errs
 }
 
-func (hdr *tvHeader) AggNonces() ([]*PublicNonce, []error) {
+func (hdr *tvHeader) AggNonces() ([]*AggregatedPublicNonce, []error) {
 	if hdr.aggNonces != nil {
 		return hdr.aggNonces, hdr.aggNoncesErrs
 	}
 
 	l := len(hdr.Aggnonces)
-	nonces := make([]*PublicNonce, 0, l)
+	nonces := make([]*AggregatedPublicNonce, 0, l)
 	errs := make([]error, 0, l)
 
 	for _, x := range hdr.Aggnonces {
@@ -236,38 +236,36 @@ func (hdr *tvHeader) Msg() []byte {
 	return mustUnhex(hdr.MsgHex)
 }
 
-func (hdr *tvHeader) KeyAggContext(t *testing.T, indices []int) *KeyAggContext {
+func (hdr *tvHeader) PublicKeyAggregator(t *testing.T, indices []int) *PublicKeyAggregator {
 	hdrPubKeys, errs := hdr.PubKeys()
 
-	pks := make([]*secec.PublicKey, 0, len(indices))
+	agg := NewPublicKeyAggregator()
 	for _, idx := range indices {
 		pk := hdrPubKeys[idx]
 		require.NotNil(t, pk, "pubKey[%d]", idx)
 		require.NoError(t, errs[idx])
-		pks = append(pks, pk)
+
+		err := agg.Add(pk)
+		require.NoError(t, err, "Add(pubKey[%d]", idx)
 	}
 
-	ctx, err := KeyAgg(pks)
-	require.NoError(t, err, "KeyAgg")
-
-	return ctx
+	return agg
 }
 
-func (hdr *tvHeader) AggNonce(t *testing.T, indices []int) *PublicNonce {
+func (hdr *tvHeader) PublicNonceAggregator(t *testing.T, indices []int) *PublicNonceAggregator {
 	hdrNonces, errs := hdr.PubNonces()
 
-	ns := make([]*PublicNonce, 0, len(indices))
+	agg := NewPublicNonceAggregator()
 	for _, idx := range indices {
 		nonce := hdrNonces[idx]
 		require.NotNil(t, nonce, "nonce[%d]", idx)
 		require.NoError(t, errs[idx])
-		ns = append(ns, nonce)
+
+		err := agg.Add(nonce)
+		require.NoError(t, err, "Add(nonce[%d]", idx)
 	}
 
-	aggNonce, err := NonceAgg(ns)
-	require.NoError(t, err, "NonceAgg")
-
-	return aggNonce
+	return agg
 }
 
 type tvValidCase struct {
@@ -289,7 +287,7 @@ func (ca *tvValidCase) Expected() []byte {
 	return mustUnhex(ca.ExpectedHex)
 }
 
-func (ca *tvValidCase) AggNonce(t *testing.T) *PublicNonce {
+func (ca *tvValidCase) AggNonce(t *testing.T) *AggregatedPublicNonce {
 	n, err := NewAggregatedPublicNonce(mustUnhex(ca.AggNonceHex))
 	require.NoError(t, err, "NewAggregatedPublicNonce")
 	return n

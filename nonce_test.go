@@ -84,7 +84,10 @@ func testNonceAggVectors(t *testing.T) {
 				t.Log(vec.Comment)
 			}
 
-			aggNonce := testVectors.AggNonce(t, vec.PNonceIndices)
+			aggregator := testVectors.PublicNonceAggregator(t, vec.PNonceIndices)
+			aggNonce, err := aggregator.Aggregate()
+			require.NoError(t, err, "PublicNonceAggregator.Aggregate")
+
 			require.Equal(t, vec.Expected(), aggNonce.Bytes())
 		})
 	}

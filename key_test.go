@@ -21,8 +21,7 @@ func testKeySortVectors(t *testing.T) {
 	expected := testVectors.SortedPubKeys(t)
 	require.Len(t, expected, len(unsorted))
 
-	sorted, err := KeySort(unsorted)
-	require.NoError(t, err, "KeySort")
+	sorted := keySort(unsorted)
 	require.Len(t, sorted, len(expected))
 
 	for i, pk := range sorted {
@@ -41,9 +40,11 @@ func testKeyAggVectors(t *testing.T) {
 				t.Log(vec.Comment)
 			}
 
-			ctx := testVectors.KeyAggContext(t, vec.KeyIndices)
+			aggregator := testVectors.PublicKeyAggregator(t, vec.KeyIndices)
+			aggPk, err := aggregator.Aggregate()
+			require.NoError(t, err, "PublicKeyAggregator.Aggregate")
 
-			require.Equal(t, vec.Expected(), ctx.XBytes())
+			require.Equal(t, vec.Expected(), aggPk.xBytes())
 		})
 	}
 
@@ -74,17 +75,22 @@ func testKeyAggVectors(t *testing.T) {
 			}
 
 			// Otherwise the failure happens during applying the tweak.
-			ctx := testVectors.KeyAggContext(t, vec.KeyIndices)
 			require.Equal(t, typeValue, vec.Error.Type)
+
+			aggregator := testVectors.PublicKeyAggregator(t, vec.KeyIndices)
+			aggPk, err := aggregator.Aggregate()
+			require.NoError(t, err, "PublicKeyAggregator.Aggregate")
 
 			// The datastructure supports more than one tweak, but
 			// current testcases only have one, so be lazy.
 			tweakIdx := vec.TweakIndices[0]
 			isXOnlyTweak := vec.IsXOnly[0]
 
-			err := ctx.ApplyTweak(tweaks[tweakIdx], isXOnlyTweak)
+			err = aggPk.ApplyTweak(tweaks[tweakIdx], isXOnlyTweak)
 			switch vec.Error.Message {
 			case tweakErrRange:
+				// The tweak is converted to a scalar in AddTweak, and
+				// out of range tweaks are rejected then.
 				require.ErrorIs(t, err, errInvalidTweak)
 			case tweakErrQInf:
 				require.ErrorIs(t, err, errQIsInfinity)

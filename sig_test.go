@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"gitlab.com/yawning/secp256k1-voi/secec/bitcoin"
 )
 
 func testSignVectors(t *testing.T) {
@@ -24,7 +23,9 @@ func testSignVectors(t *testing.T) {
 
 			sk := testVectors.SecKey(t)
 
-			ctx := testVectors.KeyAggContext(t, vec.KeyIndices)
+			pkAggregator := testVectors.PublicKeyAggregator(t, vec.KeyIndices)
+			aggPk, err := pkAggregator.Aggregate()
+			require.NoError(t, err)
 
 			msg := testVectors.Messages()[vec.MsgIndex]
 			require.NotNil(t, msg)
@@ -39,12 +40,15 @@ func testSignVectors(t *testing.T) {
 			secNonces, _ := testVectors.SecNonces()
 			secNonce := secNonces[0]
 
+			nonceAggregator := testVectors.PublicNonceAggregator(t, vec.NonceIndices)
+			aggNonce, err := nonceAggregator.Aggregate()
+			require.NoError(t, err)
+
 			aggNonces, _ := testVectors.AggNonces()
 			expectedAggNonce := aggNonces[vec.AggNonceIndex]
-			aggNonce := testVectors.AggNonce(t, vec.NonceIndices)
 			require.EqualValues(t, expectedAggNonce.Bytes(), aggNonce.Bytes())
 
-			partialSig, err := Sign(sk, ctx, secNonce, aggNonce, msg)
+			partialSig, err := Sign(sk, aggPk, secNonce, aggNonce, msg)
 			require.NoError(t, err, "Sign")
 			require.EqualValues(t, vec.Expected(), partialSig.Bytes())
 		})
@@ -69,7 +73,9 @@ func testSignVectors(t *testing.T) {
 				return
 			}
 
-			ctx := testVectors.KeyAggContext(t, vec.KeyIndices)
+			aggregator := testVectors.PublicKeyAggregator(t, vec.KeyIndices)
+			aggPk, err := aggregator.Aggregate()
+			require.NoError(t, err)
 
 			msg := testVectors.Messages()[vec.MsgIndex]
 			require.NotNil(t, msg)
@@ -92,7 +98,7 @@ func testSignVectors(t *testing.T) {
 			}
 			aggNonce := aggNonces[vec.AggNonceIndex]
 
-			partialSig, err := Sign(sk, ctx, secNonce, aggNonce, msg)
+			partialSig, err := Sign(sk, aggPk, secNonce, aggNonce, msg)
 			require.Error(t, err, "Sign")
 			require.Nil(t, partialSig)
 		})
@@ -112,39 +118,40 @@ func testPartialSigAggVectors(t *testing.T) {
 				t.Log(vec.Comment)
 			}
 
-			ctx := testVectors.KeyAggContext(t, vec.KeyIndices)
+			pkAggregator := testVectors.PublicKeyAggregator(t, vec.KeyIndices)
+			aggPk, err := pkAggregator.Aggregate()
+			require.NoError(t, err)
 
 			tweaks := testVectors.Tweaks()
 			for ii, idx := range vec.TweakIndices {
 				tweak, isXOnly := tweaks[idx], vec.IsXOnly[ii]
-				err := ctx.ApplyTweak(tweak, isXOnly)
+				err := aggPk.ApplyTweak(tweak, isXOnly)
 				require.NoError(t, err, "ApplyTweak")
 			}
 
+			nonceAggregator := testVectors.PublicNonceAggregator(t, vec.NonceIndices)
+			aggNonce, err := nonceAggregator.Aggregate()
+			require.NoError(t, err)
+
 			expectedAggNonce := vec.AggNonce(t)
-			aggNonce := testVectors.AggNonce(t, vec.NonceIndices)
 			require.EqualValues(t, expectedAggNonce.Bytes(), aggNonce.Bytes())
 
+			sigAggregator := NewPartialSignatureAggregator(aggPk, aggNonce, msg)
 			hdrPSigs, errs := testVectors.PartialSigs()
-			pSigs := make([]*PartialSignature, 0, len(vec.PSigIndices))
 			for _, idx := range vec.PSigIndices {
-				psig, err := hdrPSigs[idx], errs[idx]
+				require.NoError(t, errs[idx])
+				err = sigAggregator.Add(hdrPSigs[idx])
 				require.NoError(t, err)
-				pSigs = append(pSigs, psig)
 			}
 
-			aggSig, err := PartialSigAgg(ctx, aggNonce, msg, pSigs)
-			require.NoError(t, err, "PartialSigAgg")
-			require.Equal(t, vec.Expected(), aggSig)
+			sig, err := sigAggregator.Aggregate()
+			require.NoError(t, err)
 
 			// So, the claim/whole point of this MuSig2 nonsense is
 			// that aggregated signatures are compatible with BIP-340
 			// Schnorr signatures, so test that as well.
 
-			schnorrPub, err := bitcoin.NewSchnorrPublicKey(ctx.XBytes())
-			require.NoError(t, err, "NewSchnorrPublicKey")
-
-			ok := schnorrPub.Verify(msg, aggSig)
+			ok := aggPk.Schnorr().Verify(msg, sig)
 			require.True(t, ok, "SchnorrPublicKey.Verify")
 		})
 	}
