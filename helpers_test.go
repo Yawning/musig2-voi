@@ -9,6 +9,8 @@ import (
 
 const secretNonceSize = 97
 
+var errInvalidSecretNonce = errors.New("musig2: invalid secret nonce")
+
 func (n *SecretNonce) Bytes() []byte {
 	b := make([]byte, 0, secretNonceSize)
 	b = append(b, n.k1.Bytes()...)
@@ -19,7 +21,7 @@ func (n *SecretNonce) Bytes() []byte {
 
 func newSecretNonce(b []byte) (*SecretNonce, error) {
 	if len(b) != secretNonceSize {
-		return nil, errors.New("musig2: invalid secret nonce")
+		return nil, errInvalidSecretNonce
 	}
 
 	k1Bytes := (*[secp256k1.ScalarSize]byte)(b[:32])
@@ -28,18 +30,18 @@ func newSecretNonce(b []byte) (*SecretNonce, error) {
 
 	k1, err := secp256k1.NewScalarFromCanonicalBytes(k1Bytes)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(errInvalidSecretNonce, err)
 	}
 	k2, err := secp256k1.NewScalarFromCanonicalBytes(k2Bytes)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(errInvalidSecretNonce, err)
 	}
 	if k1.IsZero() != 0 || k2.IsZero() != 0 {
 		return nil, errKIsZero
 	}
 	pk, err := secp256k1.NewIdentityPoint().SetCompressedBytes(pkBytes)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(errInvalidSecretNonce, err)
 	}
 
 	secnonce := &SecretNonce{

@@ -31,6 +31,7 @@ func taggedHash(tag string, vals ...[]byte) []byte {
 	return h.Sum(nil)
 }
 
+//nolint:forcetypeassert
 func cloneHash(h hash.Hash) hash.Hash {
 	// This is so stupid, but it appears to be the only way to copy
 	// hash state, and it's and improvement to do this, if only for

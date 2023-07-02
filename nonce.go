@@ -28,7 +28,6 @@ const (
 var (
 	errInvalidPublicNonce    = errors.New("musig2: invalid public nonce")
 	errEntropySource         = errors.New("musig2: entropy source failure")
-	errKeyMismatch           = errors.New("musig2: public/private key mismatch")
 	errInvalidExtraInput     = errors.New("musig2: invalid exra input")
 	errKIsZero               = errors.New("musig2: k1 or k2 is zero")
 	errInvalidNumberOfNonces = errors.New("musig2: invalid number of nonces")
@@ -124,16 +123,16 @@ func (n *SecretNonce) PublicNonce() *PublicNonce {
 
 func (n *SecretNonce) genPublicNonce() *PublicNonce {
 	// Let R_1 = k1 * G, R_2 = k2 * G
-	R_1 := secp256k1.NewIdentityPoint().ScalarBaseMult(n.k1)
-	R_2 := secp256k1.NewIdentityPoint().ScalarBaseMult(n.k2)
+	r1 := secp256k1.NewIdentityPoint().ScalarBaseMult(n.k1)
+	r2 := secp256k1.NewIdentityPoint().ScalarBaseMult(n.k2)
 
 	// Let pubnonce = cbytes(R_1) || cbytes(R_2)
 	b := make([]byte, 0, PublicNonceSize)
-	b = append(b, R_1.CompressedBytes()...)
-	b = append(b, R_2.CompressedBytes()...)
+	b = append(b, r1.CompressedBytes()...)
+	b = append(b, r2.CompressedBytes()...)
 	return &PublicNonce{
-		r1: R_1,
-		r2: R_2,
+		r1: r1,
+		r2: r2,
 		b:  b,
 	}
 }
@@ -169,7 +168,7 @@ func nonceGen(k *secec.PublicKey, sk *secec.PrivateKey, aggpk, m, extraIn, randP
 		// This is possibly "harmless", but it is a sign that
 		// the caller is doing something horrifically wrong.
 		if !sk.PublicKey().Equal(k) {
-			panic(errKeyMismatch) // Yes, a panic.
+			panic("musig2: public/private key mismatch") // Yes, a panic.
 		}
 
 		// Let rand be the byte-wise xor of sk and hashMuSig/aux(rand')
@@ -199,7 +198,7 @@ func nonceGen(k *secec.PublicKey, sk *secec.PrivateKey, aggpk, m, extraIn, randP
 	//
 	// Note/yawning: Just use TupleHash, Jesus fucking Christ.
 
-	kBytes := k.CompressedBytes()
+	kBytes := k.CompressedBytes() //nolint:revive
 
 	h := newTaggedHash(tagNonce)
 	_, _ = h.Write(rand)                      // rand
@@ -270,7 +269,7 @@ func (agg *PublicNonceAggregator) Add(nonce *PublicNonce) error {
 
 	if agg.r1 == nil {
 		if agg.r2 != nil || agg.u != 0 {
-			panic("BUG: PublicNonceAggregator state corruption")
+			panic("musig2: BUG: PublicNonceAggregator state corruption")
 		}
 		agg.r1 = secp256k1.NewPointFrom(nonce.r1)
 		agg.r2 = secp256k1.NewPointFrom(nonce.r2)
