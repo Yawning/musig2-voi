@@ -172,7 +172,7 @@ func (ctx *KeyAggContext) ApplyTweak(tweak []byte, isXOnlyTweak bool) error {
 	ctx.gacc.Multiply(g, ctx.gacc)
 
 	// Let tacc' = t + g * tacc mod n
-	ctx.tacc = sumScalars(t, mulScalars(g, ctx.tacc))
+	ctx.tacc = secp256k1.NewScalar().Sum(t, secp256k1.NewScalar().Product(g, ctx.tacc))
 
 	// Return keyagg_ctx' = (Q', gacc', tacc')
 	ctx.q.Set(qP)

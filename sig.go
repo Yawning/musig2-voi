@@ -132,11 +132,11 @@ func (k *PrivateKey) Sign(keyCtx *KeyAggContext, secNonce *SecretNonce, aggNonce
 	g := secp256k1.NewScalar().ConditionalSelect(scOne, scNegOne, keyCtx.q.IsYOdd())
 
 	// Let d = g * gacc * d' mod n (See Negation Of The Secret Key When Signing)
-	d := mulScalars(g, keyCtx.gacc, k.dPrime)
+	d := secp256k1.NewScalar().Product(g, keyCtx.gacc, k.dPrime)
 
 	// Let s = (k1 + b * k2 + e * a * d) mod n
 	// Let psig = bytes(32, s)
-	s := sumScalars(k1, mulScalars(b, k2), mulScalars(e, a, d))
+	s := secp256k1.NewScalar().Sum(k1, secp256k1.NewScalar().Product(b, k2), secp256k1.NewScalar().Product(e, a, d))
 
 	// Let pubnonce = cbytes(k1'⋅G) || cbytes(k2'⋅G)
 	// If PartialSigVerifyInternal(psig, pubnonce, pk, session_ctx) (see below) returns failure, fail
@@ -165,7 +165,7 @@ func PartialSigAgg(keyCtx *KeyAggContext, aggNonce *PublicNonce, m []byte, pSigs
 	g := secp256k1.NewScalar().ConditionalSelect(scOne, scNegOne, keyCtx.q.IsYOdd())
 
 	// Let s = s_1 + ... + s_u + e * g * tacc mod n
-	s := mulScalars(e, g, keyCtx.tacc)
+	s := secp256k1.NewScalar().Product(e, g, keyCtx.tacc)
 	for _, pSig := range pSigs {
 		s.Add(s, pSig.s)
 	}

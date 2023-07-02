@@ -6,8 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding"
 	"hash"
-
-	"gitlab.com/yawning/secp256k1-voi"
 )
 
 // Dumping ground for various helpers.
@@ -47,23 +45,4 @@ func cloneHash(h hash.Hash) hash.Hash {
 	}
 
 	return nh
-}
-
-// TODO: At some point, these could be upstreamed into the Scalar
-// implementation.
-
-func mulScalars(vec ...*secp256k1.Scalar) *secp256k1.Scalar {
-	product := secp256k1.NewScalar().One()
-	for _, v := range vec {
-		product.Multiply(product, v)
-	}
-	return product
-}
-
-func sumScalars(vec ...*secp256k1.Scalar) *secp256k1.Scalar {
-	sum := secp256k1.NewScalar()
-	for _, v := range vec {
-		sum.Add(sum, v)
-	}
-	return sum
 }
