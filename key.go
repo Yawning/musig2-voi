@@ -25,7 +25,6 @@ var (
 	scOne    = secp256k1.NewScalar().One()
 	scNegOne = secp256k1.NewScalar().Negate(scOne)
 
-	errInvalidPublicKey    = errors.New("musig2: invalid public key")
 	errInvalidNumberOfKeys = errors.New("musig2: invalid number of public keys")
 	errInvalidTweak        = errors.New("musig2: invalid tweak")
 	errPublicKeyNotInAgg   = errors.New("musig2: public key not part of aggregate key")
@@ -55,6 +54,8 @@ type AggregatedPublicKey struct {
 	gacc *secp256k1.Scalar
 
 	pks []*secec.PublicKey
+	pk2 []byte // GetSecondKey(pk_1..u)
+	l   []byte // HashKeys(pk_1..u)
 }
 
 // ApplyTweak applies a tweak to the aggregated public key.
@@ -128,7 +129,15 @@ func (aggPk *AggregatedPublicKey) getSessionKeyAggCoeff(pk *secec.PublicKey) (*s
 		return nil, errPublicKeyNotInAgg
 	}
 
-	return keyAggCoeff(aggPk.pks, pk), nil
+	// Return KeyAggCoeff(pk1..u, pk)
+	//
+	//   Internal Algorithm KeyAggCoeff(pk_1..u, pk')
+	//     Let pk2 = GetSecondKey(pk_1..u):
+	//     Return KeyAggCoeffInternal(pk_1..u, pk', pk2)
+	if aggPk.pk2 == nil {
+		panic("musig2: BUG: pk2 is nil")
+	}
+	return keyAggCoeffInternal(aggPk.l, pk, aggPk.pk2), nil
 }
 
 // PublicKeyAggregator accumulates PublicKeys, before doing the final
@@ -155,7 +164,7 @@ func (agg *PublicKeyAggregator) Add(pk *secec.PublicKey) error {
 		return errInvalidNumberOfKeys
 	}
 	if pk == nil {
-		panic(errInvalidPublicKey)
+		panic("musig2: invalid public key")
 	}
 
 	agg.pks = append(agg.pks, pk)
@@ -179,13 +188,16 @@ func (agg *PublicKeyAggregator) Aggregate() (*AggregatedPublicKey, error) {
 	// KeyAgg - Key Aggregation
 	//
 
+	// Let L = HashKeys(pk1..u) (From KeyAggCoeffInternal)
+	L := hashKeys(pks)
+
 	// Let pk2 = GetSecondKey(pk_1..u)
 	pk2 := getSecondKey(pks)
 
 	// For i = 1 .. u:
 	Q := secp256k1.NewIdentityPoint()
 	for i := range pks {
-		pk_i := pks[i]
+		pk := pks[i]
 
 		// Let P_i = cpoint(pk_i); fail if that fails and blame signer
 		// i for invalid individual public key.
@@ -193,13 +205,12 @@ func (agg *PublicKeyAggregator) Aggregate() (*AggregatedPublicKey, error) {
 		// Note/yawning: Since we use sensible data-types rather
 		// than byte vectors for public keys, `pks` is guaranteed
 		// to be a vector of points on the curve.
-		P_i := pk_i.Point()
+		P := pk.Point()
 
 		// Let a_i = KeyAggCoeffInternal(pk_1..u, pk_i, pk2).
-		a_i := keyAggCoeffInternal(pks, pk_i, pk2)
+		a := keyAggCoeffInternal(L, pk, pk2)
 
-		Q_i := secp256k1.NewIdentityPoint().ScalarMult(a_i, P_i) // XXX/perf: Vartime
-		Q.Add(Q, Q_i)
+		Q.Add(Q, secp256k1.NewIdentityPoint().ScalarMult(a, P))
 	}
 
 	// Let Q = a1 * P1 + a2 * P2 + ... + au * Pu
@@ -216,11 +227,18 @@ func (agg *PublicKeyAggregator) Aggregate() (*AggregatedPublicKey, error) {
 	// Let gacc = 1
 	// Let tacc = 0
 	// Return keyagg_ctx = (Q, gacc, tacc).
+	//
+	// Note/yawning: We opt to store extra values that are required
+	// as part of the signing/verification process as well so that
+	// further calls to getSecondKey (pk2), and HashKeys (L) can
+	// be omitted entirely.
 	return &AggregatedPublicKey{
 		q:    Q,
 		gacc: secp256k1.NewScalarFrom(scOne),
 		tacc: secp256k1.NewScalar(),
 		pks:  pks,
+		pk2:  pk2,
+		l:    L,
 	}, nil
 }
 
@@ -229,7 +247,7 @@ func NewPublicKeyAggregator() *PublicKeyAggregator {
 	return new(PublicKeyAggregator)
 }
 
-// Internal Algorithm HashKeys(pk_1..u)
+// Internal Algorithm HashKeys(pk_1..u).
 func hashKeys(pks []*secec.PublicKey) []byte {
 	// Return hashKeyAgg list(pk_1 || pk_2 || ... || pk_u)
 	h := newTaggedHash(tagKeyAggList)
@@ -239,7 +257,7 @@ func hashKeys(pks []*secec.PublicKey) []byte {
 	return h.Sum(nil)
 }
 
-// Internal Algorithm GetSecondKey(pk_1..u)
+// Internal Algorithm GetSecondKey(pk_1..u).
 func getSecondKey(pks []*secec.PublicKey) []byte {
 	pk1 := pks[0] // The spec starts indexes from 1.
 
@@ -260,30 +278,23 @@ func getSecondKey(pks []*secec.PublicKey) []byte {
 	return cIdentityBytes
 }
 
-// Internal Algorithm KeyAggCoeff(pk_1..u, pk')
-func keyAggCoeff(pks []*secec.PublicKey, pkP *secec.PublicKey) *secp256k1.Scalar {
-	// Let pk2 = GetSecondKey(pk_1..u):
-	pk2 := getSecondKey(pks)
-
-	// Return KeyAggCoeffInternal(pk_1..u, pk', pk2)
-	return keyAggCoeffInternal(pks, pkP, pk2)
-}
-
-// Internal Algorithm KeyAggCoeffInternal(pk_1..u, pk', pk2)
-func keyAggCoeffInternal(pks []*secec.PublicKey, pkP *secec.PublicKey, pk2 []byte) *secp256k1.Scalar {
-	// Let L = HashKeys(pk1..u)
-	L := hashKeys(pks) // XXX/perf: Cache and reuse this holy shit.
-
+// Internal Algorithm KeyAggCoeffInternal(pk_1..u, pk', pk2).
+func keyAggCoeffInternal(l []byte, pkP *secec.PublicKey, pk2 []byte) *secp256k1.Scalar {
 	// If pk' = pk2:
-	if bytes.Equal(pkP.CompressedBytes(), pk2) { // XXX/perf: Reorder to before hashing.
+	if bytes.Equal(pkP.CompressedBytes(), pk2) {
 		// Return 1
 		return scOne
+	}
+
+	// Let L = HashKeys(pk1..u)
+	if l == nil {
+		panic("musig2: BUG: L is nil")
 	}
 
 	// Return int(hashKeyAgg coefficient(L || pk')) mod n
 	b := taggedHash(
 		tagKeyAggCoefficient,
-		L,                     // L
+		l,                     // L
 		pkP.CompressedBytes(), // pk'
 	)
 	sc, _ := secp256k1.NewScalarFromBytes((*[secp256k1.ScalarSize]byte)(b))
