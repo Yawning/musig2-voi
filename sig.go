@@ -20,6 +20,7 @@ var (
 	errKeyNonceMismatch    = errors.New("musig2: secnonce for different private key")
 	errInvalidNumberOfSigs = errors.New("musig2: invalid number of signatures")
 	errInvalidPartialSig   = errors.New("musig2: invalid partial signature")
+	errSigCheckFailed      = errors.New("musig2: failed to verify partial signature")
 )
 
 // PartialSignature is an un-aggregated partial signature.
@@ -32,6 +33,50 @@ func (ps *PartialSignature) Bytes() []byte {
 	return ps.s.Bytes()
 }
 
+// Verify verifies a PartialSignature.  This routine is only needed if
+// identifiable aborts are required.
+//
+// WARNING: Partial signatures ARE NOT signatures.  An adversary is
+// capable of forging a partial signature without knowing the private
+// key for the claimed individual public key.
+func (ps *PartialSignature) Verify(pk *secec.PublicKey, pubNonce *PublicNonce, aggPk *AggregatedPublicKey, aggNonce *AggregatedPublicNonce, msg []byte) bool {
+	// Let (Q, gacc, _, b, R, e) = GetSessionValues(session_ctx);
+	// fail if that fails
+	b, R, e := getNonceValues(aggPk, aggNonce, msg)
+
+	// Let s = int(psig); fail if s >= n
+	// Let R*,1 = cpoint(pubnonce[0:33]), R*,2 = cpoint(pubnonce[33:66])
+	// Let Re*' = R*,1 + b * R*,2
+	effNonce := secp256k1.NewIdentityPoint().ScalarMult(b, pubNonce.r2)
+	effNonce.Add(effNonce, pubNonce.r1)
+
+	// Let effective nonce Re* = Re*' if has_even_y(R), otherwise let Re* = -Re*'
+	effNonce.ConditionalNegate(effNonce, R.IsYOdd())
+
+	// Let P = cpoint(pk); fail if that fails
+	// Let a = GetSessionKeyAggCoeff(session_ctx, P)
+	a, err := aggPk.getSessionKeyAggCoeff(pk)
+	if err != nil {
+		return false
+	}
+
+	// Let g = 1 if has_even_y(Q), otherwise let g = -1 mod n
+	g := secp256k1.NewScalar().ConditionalSelect(scOne, scNegOne, aggPk.q.IsYOdd())
+
+	// Let g' = g * gacc mod n (See Negation Of The Individual Public Key When Partially Verifying)
+	gP := secp256k1.NewScalar().Multiply(g, aggPk.gacc)
+
+	// Fail if s * G != Re* + e * a * g' * P
+	// Return success iff no failure occurred before reaching this point.
+	//
+	// Rewriting for performance, Re* ?= s * G - e * a * g' * P
+	gP.Negate(gP)
+	negEAGp := secp256k1.NewScalar().Product(e, a, gP)
+	maybeEffNonce := secp256k1.NewIdentityPoint().DoubleScalarMultBasepointVartime(ps.s, negEAGp, pk.Point())
+
+	return maybeEffNonce.Equal(effNonce) == 1
+}
+
 // NewPartialSignature deserializes a PartialSignature from the byte-encoded
 // form.
 func NewPartialSignature(b []byte) (*PartialSignature, error) {
@@ -39,6 +84,7 @@ func NewPartialSignature(b []byte) (*PartialSignature, error) {
 		return nil, errInvalidPartialSig
 	}
 
+	// Let s = int(psig); fail if s >= n
 	sc, err := secp256k1.NewScalarFromCanonicalBytes((*[secp256k1.ScalarSize]byte)(b))
 	if err != nil {
 		return nil, errors.Join(errInvalidPartialSig, err)
@@ -122,7 +168,7 @@ func Sign(k *secec.PrivateKey, aggPk *AggregatedPublicKey, secNonce *SecretNonce
 		return nil, err
 	}
 
-	// XXX/yawning: Obliterate secNonce or something
+	// XXX/yawning: Obliterate secNonce or something. Save pubNonce.
 
 	// Let g = 1 if has_even_y(Q), otherwise let g = -1 mod n
 	g := secp256k1.NewScalar().ConditionalSelect(scOne, scNegOne, aggPk.q.IsYOdd())
@@ -133,17 +179,19 @@ func Sign(k *secec.PrivateKey, aggPk *AggregatedPublicKey, secNonce *SecretNonce
 	// Let s = (k1 + b * k2 + e * a * d) mod n
 	// Let psig = bytes(32, s)
 	s := secp256k1.NewScalar().Sum(k1, secp256k1.NewScalar().Product(b, k2), secp256k1.NewScalar().Product(e, a, d))
+	pSig := &PartialSignature{
+		s: s,
+	}
 
 	// Let pubnonce = cbytes(k1'⋅G) || cbytes(k2'⋅G)
 	// If PartialSigVerifyInternal(psig, pubnonce, pk, session_ctx) (see below) returns failure, fail
+	if !pSig.Verify(k.PublicKey(), secNonce.PublicNonce(), aggPk, aggNonce, msg) {
+		return nil, errSigCheckFailed
+	}
 
 	// Return partial signature psig
-	return &PartialSignature{
-		s: s,
-	}, nil
+	return pSig, nil
 }
-
-// TODO: PartialSigVerify or whatever, who cares.
 
 // PartialSignatureAggregator accumulates PartialSignatures, before doing
 // the final aggregation and generating a BIP-340 compatible Schnorr
