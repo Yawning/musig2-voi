@@ -1,3 +1,7 @@
+// Copyright (c) 2023 Yawning Angel
+//
+// SPDX-License-Identifier: SSPL-1.0
+
 package musig2
 
 import (

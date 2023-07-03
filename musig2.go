@@ -1,3 +1,7 @@
+// Copyright (c) 2023 Yawning Angel
+//
+// SPDX-License-Identifier: SSPL-1.0
+
 // Package musig2 implements the MuSig2 multi-signature algorithm as
 // specified in BIP-0327.
 package musig2
