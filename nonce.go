@@ -16,6 +16,8 @@ const (
 	// PublicNonceSize is the size of a byte-encoded (Aggregated)PublicNonce
 	// in bytes.
 	PublicNonceSize = 66 // secp256k1.CompressedPointSize * 2
+	// SecretNonceSize is the size of a byte-encoded SecretNonce in bytes.
+	SecretNonceSize = 97
 
 	nonceEntropySize = 32
 	maxNonces        = math.MaxUint32
@@ -27,6 +29,7 @@ const (
 
 var (
 	errInvalidPublicNonce    = errors.New("musig2: invalid public nonce")
+	errInvalidSecretNonce    = errors.New("musig2: invalid secret nonce")
 	errEntropySource         = errors.New("musig2: entropy source failure")
 	errInvalidExtraInput     = errors.New("musig2: invalid exra input")
 	errKIsZero               = errors.New("musig2: k1 or k2 is zero")
@@ -116,6 +119,15 @@ type SecretNonce struct {
 	publicNonce *PublicNonce
 }
 
+// Bytes returns the byte-encoding of the SecretNonce.
+func (n *SecretNonce) Bytes() []byte {
+	b := make([]byte, 0, SecretNonceSize)
+	b = append(b, n.k1.Bytes()...)
+	b = append(b, n.k2.Bytes()...)
+	b = append(b, n.pk.CompressedBytes()...)
+	return b
+}
+
 // PublicNonce returns the SecretNonce's corresponding PublicNonce.
 func (n *SecretNonce) PublicNonce() *PublicNonce {
 	return n.publicNonce
@@ -158,7 +170,41 @@ func (n *SecretNonce) genPublicNonce() *PublicNonce {
 	}
 }
 
-// XXX: Figure out how to handle SecretNonce s11n vs consumption.
+// NewSecretNonce deserializes a SecretNonce from the byte-encoded form.
+func NewSecretNonce(b []byte) (*SecretNonce, error) {
+	if len(b) != SecretNonceSize {
+		return nil, errInvalidSecretNonce
+	}
+
+	k1Bytes := (*[secp256k1.ScalarSize]byte)(b[:32])
+	k2Bytes := (*[secp256k1.ScalarSize]byte)(b[32:64])
+	pkBytes := b[64:]
+
+	k1, err := secp256k1.NewScalarFromCanonicalBytes(k1Bytes)
+	if err != nil {
+		return nil, errors.Join(errInvalidSecretNonce, err)
+	}
+	k2, err := secp256k1.NewScalarFromCanonicalBytes(k2Bytes)
+	if err != nil {
+		return nil, errors.Join(errInvalidSecretNonce, err)
+	}
+	if k1.IsZero() != 0 || k2.IsZero() != 0 {
+		return nil, errKIsZero
+	}
+	pk, err := secp256k1.NewIdentityPoint().SetCompressedBytes(pkBytes)
+	if err != nil {
+		return nil, errors.Join(errInvalidSecretNonce, err)
+	}
+
+	secnonce := &SecretNonce{
+		k1: k1,
+		k2: k2,
+		pk: pk,
+	}
+	secnonce.publicNonce = secnonce.genPublicNonce()
+
+	return secnonce, nil
+}
 
 // GenerateNonce generates a new SecretNonce/PublicNonce pair for a given
 // individual PublicKey.  All other parameters are optional, but strongly

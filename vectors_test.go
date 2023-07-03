@@ -130,7 +130,7 @@ func (hdr *tvHeader) SecNonces() ([]*SecretNonce, []error) {
 	errs := make([]error, 0, l)
 
 	for _, x := range hdr.Secnonces {
-		n, err := newSecretNonce(mustUnhex(x))
+		n, err := NewSecretNonce(mustUnhex(x))
 		nonces = append(nonces, n)
 		errs = append(errs, err)
 	}
