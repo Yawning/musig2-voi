@@ -17,9 +17,10 @@ const (
 )
 
 var (
-	errKeyNonceMismatch    = errors.New("musig2: secnonce for different private key")
+	errKeyNonceMismatch    = errors.New("musig2: secnonce for different signing key")
 	errInvalidNumberOfSigs = errors.New("musig2: invalid number of signatures")
 	errInvalidPartialSig   = errors.New("musig2: invalid partial signature")
+	errNonceReuse          = errors.New("musig2: sign with invalidated nonce")
 	errSigCheckFailed      = errors.New("musig2: failed to verify partial signature")
 )
 
@@ -137,11 +138,14 @@ func getNonceValues(aggPk *AggregatedPublicKey, aggNonce *AggregatedPublicNonce,
 	return b, rP, e // b, R, e
 }
 
-// Sign produces a PartialSignature over msg.
+// Sign produces a PartialSignature over msg.  Regardless of this routine's
+// success the provided SecretNonce will be cleared via Invalidate.
 //
 // WARNING: `secNonce` MUST NEVER be reused or exposed otherwise the signing
 // key will be trivially compromised from partial signature(s).
 func Sign(k *secec.PrivateKey, aggPk *AggregatedPublicKey, secNonce *SecretNonce, aggNonce *AggregatedPublicNonce, msg []byte) (*PartialSignature, error) {
+	defer secNonce.Invalidate()
+
 	// Let (Q, gacc, _, b, R, e) = GetSessionValues(session_ctx);
 	// fail if that fails
 	b, R, e := getNonceValues(aggPk, aggNonce, msg)
@@ -149,6 +153,9 @@ func Sign(k *secec.PrivateKey, aggPk *AggregatedPublicKey, secNonce *SecretNonce
 	// Let k1' = int(secnonce[0:32]), k2' = int(secnonce[32:64])
 	// Fail if ki' = 0 or ki' >= n for i = 1..2
 	// Let k1 = k1', k2 = k2' if has_even_y(R), otherwise let k1 = n - k1', k2 = n - k2'
+	if !secNonce.IsValid() {
+		return nil, errNonceReuse
+	}
 	isYOdd := R.IsYOdd()
 	k1 := secp256k1.NewScalar().ConditionalNegate(secNonce.k1, isYOdd)
 	k2 := secp256k1.NewScalar().ConditionalNegate(secNonce.k2, isYOdd)
@@ -158,7 +165,7 @@ func Sign(k *secec.PrivateKey, aggPk *AggregatedPublicKey, secNonce *SecretNonce
 	// Let P = d' * G
 	// Let pk = cbytes(P)
 	// Fail if pk != secnonce[64:97]
-	if k.PublicKey().Point().Equal(secNonce.pk) != 1 {
+	if !secNonce.IsFor(k.PublicKey()) {
 		return nil, errKeyNonceMismatch
 	}
 
@@ -167,8 +174,6 @@ func Sign(k *secec.PrivateKey, aggPk *AggregatedPublicKey, secNonce *SecretNonce
 	if err != nil {
 		return nil, err
 	}
-
-	// XXX/yawning: Obliterate secNonce or something. Save pubNonce.
 
 	// Let g = 1 if has_even_y(Q), otherwise let g = -1 mod n
 	g := secp256k1.NewScalar().ConditionalSelect(scOne, scNegOne, aggPk.q.IsYOdd())

@@ -38,7 +38,7 @@ func testSignVectors(t *testing.T) {
 			// things were so tight that they can't spare (at most)
 			// 97-bytes per valid test case.
 			secNonces, _ := testVectors.SecNonces()
-			secNonce := secNonces[0]
+			secNonce := secNonces[0].UnsafeClone()
 
 			nonceAggregator := testVectors.PublicNonceAggregator(t, vec.NonceIndices)
 			aggNonce, err := nonceAggregator.Aggregate()
@@ -51,6 +51,9 @@ func testSignVectors(t *testing.T) {
 			partialSig, err := Sign(sk, aggPk, secNonce, aggNonce, msg)
 			require.NoError(t, err, "Sign")
 			require.EqualValues(t, vec.Expected(), partialSig.Bytes())
+
+			// Check that the secNonce got invalidated.
+			require.False(t, secNonce.IsValid())
 		})
 	}
 
@@ -88,6 +91,7 @@ func testSignVectors(t *testing.T) {
 				require.ErrorIs(t, errs[vec.SecNonceIndex], errKIsZero)
 				return
 			}
+			secNonce = secNonce.UnsafeClone()
 
 			aggNonces, errs := testVectors.AggNonces()
 			if vec.Error.Is(typeInvalidContribution, contribAggNonce) {
@@ -101,6 +105,9 @@ func testSignVectors(t *testing.T) {
 			partialSig, err := Sign(sk, aggPk, secNonce, aggNonce, msg)
 			require.Error(t, err, "Sign")
 			require.Nil(t, partialSig)
+
+			// Check that the secNonce got invalidated, the fast way.
+			require.False(t, secNonce.IsValid())
 		})
 	}
 }

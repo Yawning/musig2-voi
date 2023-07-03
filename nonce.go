@@ -107,8 +107,8 @@ func NewAggregatedPublicNonce(b []byte) (*AggregatedPublicNonce, error) {
 
 // SecretNonce is a individual secret nonce.
 //
-// WARNING: This value MUST NEVER be reused or exposed otherwise the signing
-// key will be trivially compromised from partial signature(s).
+// WARNING: This value MUST NEVER be reused or exposed otherwise the
+// signing key will be trivially compromised from partial signature(s).
 type SecretNonce struct {
 	k1, k2 *secp256k1.Scalar
 	pk     *secp256k1.Point
@@ -119,6 +119,27 @@ type SecretNonce struct {
 // PublicNonce returns the SecretNonce's corresponding PublicNonce.
 func (n *SecretNonce) PublicNonce() *PublicNonce {
 	return n.publicNonce
+}
+
+// IsFor returns true iff the SecretNonce is associated with the provided
+// PublicKey.
+func (n *SecretNonce) IsFor(pk *secec.PublicKey) bool {
+	return pk.Point().Equal(n.pk) == 1
+}
+
+// IsValid returns true iff the SecretNonce appears to be valid.
+func (n *SecretNonce) IsValid() bool {
+	notOk := n.pk.IsIdentity() | n.k1.IsZero() | n.k2.IsZero()
+	return notOk == 0
+}
+
+// Invalidate clears the internal values of a SecretNonce such that it
+// can no longer be used via Sign.  This is intended as operator error
+// mitigation, rather than secure erasure.
+func (n *SecretNonce) Invalidate() {
+	n.k1.Zero()
+	n.k2.Zero()
+	n.pk.Identity()
 }
 
 func (n *SecretNonce) genPublicNonce() *PublicNonce {
