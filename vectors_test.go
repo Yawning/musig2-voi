@@ -24,7 +24,8 @@ func TestVectors(t *testing.T) {
 	t.Run("Nonce/Gen", testNonceGenVectors)
 	t.Run("Nonce/Agg", testNonceAggVectors)
 	t.Run("Sign", testSignVectors)
-	t.Run("PartialSigAgg", testPartialSigAggVectors)
+	t.Run("PartialSig/Verify", testPartialSigVerifyVectors)
+	t.Run("PartialSig/Agg", testPartialSigAggVectors)
 }
 
 func unpackTestVectors(t *testing.T, fn string, dst any) {
@@ -310,9 +311,12 @@ type tvErrorCase struct {
 	IsXOnly       []bool            `json:"is_xonly"`
 	PNonceIndices []int             `json:"pnonce_indices"`
 	PSigIndices   []int             `json:"psig_indices"`
+	NonceIndices  []int             `json:"nonce_indices"`
 	AggNonceIndex int               `json:"aggnonce_index"`
 	SecNonceIndex int               `json:"secnonce_index"`
 	MsgIndex      int               `json:"msg_index"`
+	SignerIndex   int               `json:"signer_index"`
 	Error         tvErrorCaseReason `json:"error"`
+	Sig           string            `json:"sig"`
 	Comment       string            `json:"comment"`
 }

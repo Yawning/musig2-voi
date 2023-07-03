@@ -52,6 +52,10 @@ func testSignVectors(t *testing.T) {
 			require.NoError(t, err, "Sign")
 			require.EqualValues(t, vec.Expected(), partialSig.Bytes())
 
+			// This is done implicitly, but do it explicitly as well.
+			ok := partialSig.Verify(sk.PublicKey(), secNonce.PublicNonce(), aggPk, aggNonce, msg)
+			require.True(t, ok)
+
 			// Check that the secNonce got invalidated.
 			require.False(t, secNonce.IsValid())
 		})
@@ -112,6 +116,83 @@ func testSignVectors(t *testing.T) {
 	}
 }
 
+func testPartialSigVerifyVectors(t *testing.T) {
+	// We are only concerned about the various failures, as the
+	// successful case is covered by the Sign tests.
+
+	var testVectors struct {
+		tvHeader
+		Fail  []tvErrorCase `json:"verify_fail_test_cases"`
+		Error []tvErrorCase `json:"verify_error_test_cases"`
+	}
+	unpackTestVectors(t, "testdata/sign_verify_vectors.json", &testVectors)
+
+	pubKeys, pubKeysErrs := testVectors.PubKeys()
+	pubNonces, pubNoncesErrs := testVectors.PubNonces()
+
+	for i := range testVectors.Fail {
+		vec := &testVectors.Fail[i]
+		t.Run(fmt.Sprintf("Fail %d", i), func(t *testing.T) {
+			if vec.Comment != "" {
+				t.Log(vec.Comment)
+			}
+
+			aggregator := testVectors.PublicKeyAggregator(t, vec.KeyIndices)
+			aggPk, err := aggregator.Aggregate()
+			require.NoError(t, err)
+
+			msg := testVectors.Messages()[vec.MsgIndex]
+			require.NotNil(t, msg)
+
+			nonceAggregator := testVectors.PublicNonceAggregator(t, vec.NonceIndices)
+			aggNonce, err := nonceAggregator.Aggregate()
+			require.NoError(t, err)
+
+			idx := vec.SignerIndex
+			pubKey, pubNonce := pubKeys[vec.KeyIndices[idx]], pubNonces[vec.NonceIndices[idx]]
+
+			partialSig, err := NewPartialSignature(mustUnhex(vec.Sig))
+
+			// Is it too much to ask for test cases to consistently include
+			// the "error" sub-structure.
+			switch i {
+			case 2:
+				// Signature fails to deserialize.
+				require.Nil(t, partialSig)
+				require.ErrorIs(t, err, errInvalidPartialSig)
+			default:
+				require.NoError(t, err)
+				ok := partialSig.Verify(pubKey, pubNonce, aggPk, aggNonce, msg)
+				require.False(t, ok)
+			}
+		})
+	}
+
+	for i := range testVectors.Error {
+		vec := &testVectors.Error[i]
+		t.Run(fmt.Sprintf("Error %d", i), func(t *testing.T) {
+			if vec.Comment != "" {
+				t.Log(vec.Comment)
+			}
+
+			// These are just deserialization failures.
+			require.Equal(t, typeInvalidContribution, vec.Error.Type)
+			idx := vec.SignerIndex
+			pubKeyErr, pubNonceErr := pubKeysErrs[vec.KeyIndices[idx]], pubNoncesErrs[vec.NonceIndices[idx]]
+			t.Log(pubKeyErr)
+			t.Log(pubNonceErr)
+			switch vec.Error.Contrib {
+			case contribPubKey:
+				require.Error(t, pubKeyErr)
+			case contribPubNonce:
+				require.Error(t, pubNonceErr)
+			default:
+				t.Fatalf("unsupported test case contrib: '%s'", vec.Error.Contrib)
+			}
+		})
+	}
+}
+
 func testPartialSigAggVectors(t *testing.T) {
 	var testVectors tvHeader
 	unpackTestVectors(t, "testdata/sig_agg_vectors.json", &testVectors)
@@ -167,7 +248,7 @@ func testPartialSigAggVectors(t *testing.T) {
 		vec := &testVectors.Error[i]
 		t.Run(fmt.Sprintf("Error %d", i), func(t *testing.T) {
 			// There's only one test case, and it's signature s11n
-			// related. Naturally, unlike all the other test cases,
+			// related. Naturally, unlike the other test cases,
 			// the `error` is missing `contrib`, because fuck you.
 			require.True(t, vec.Error.Is(typeInvalidContribution, ""))
 			hdrPSigs, errs := testVectors.PartialSigs()
