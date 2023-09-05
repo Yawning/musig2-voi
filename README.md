@@ -1,7 +1,7 @@
 ### MuSig2
 #### Yawning Angel (yawning at schwanenlied dot me)
 
-A MuSig2 implementation, compatible with [BIP-327][1], done out of boredom
+A MuSig2 implementation, compatible with [BIP-0327][1], done out of boredom
 and to test-drive [secp256k1-voi][2].
 
 #### Warning
